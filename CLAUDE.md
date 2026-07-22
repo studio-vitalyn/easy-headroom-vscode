@@ -60,11 +60,13 @@ extension must not pretend otherwise:
 
 A separate, optional project — **`docker-easy-headroom`** — provides a
 Docker bundle for teams who want a centralized Headroom instance shared
-across multiple machines/containers. Not started yet; its placeholder
-spec lives in `../docker/CLAUDE.md` — logically a separate project/repo,
-just colocated on disk under the shared `easy-headroom/` parent
-(`easy-headroom/vscode/` for this extension, `easy-headroom/docker/`
-for the Docker bundle).
+across multiple machines/containers. It has a first working cut — see
+`../docker/CLAUDE.md`. Logically a separate project, and physically a
+separate GitHub repo (`studio-vitalyn/easy-headroom-docker`), consumed
+here as a git submodule at `easy-headroom/docker/` — this extension
+lives the same way, as `studio-vitalyn/easy-headroom-vscode` at
+`easy-headroom/vscode/`. Both are submodules of the `easy-headroom`
+parent repo, which is hosted on GitLab (not GitHub).
 
 ## Context / why this project exists
 
@@ -88,9 +90,9 @@ project).
 ```
 easy-headroom/
 ├── vscode/       → this project — the VS Code extension (main product)
-└── docker/       → docker-easy-headroom (not started) — optional Docker
-                     bundle to self-host Headroom + the RTK aggregation
-                     service, for teams / multi-machine setups
+└── docker/       → docker-easy-headroom (first working cut) — optional
+                     Docker bundle to self-host Headroom + the RTK
+                     aggregation service, for teams / multi-machine setups
 ```
 
 A solo dev only needs `vscode/` (local mode, everything runs on their
@@ -692,8 +694,8 @@ that point) — so cleanup can't be automatic when the user clicks
 ## `docker-easy-headroom`
 
 Full spec lives in that project's own `CLAUDE.md`, under
-[`../docker/`](../docker/CLAUDE.md) — not started yet, placeholder
-only.
+[`../docker/`](../docker/CLAUDE.md) — first working cut, no longer a
+placeholder.
 
 ---
 
@@ -717,7 +719,15 @@ resolve GitHub release asset URLs for Headroom at all.
 
 Resolved: distribution is via the official VS Code Marketplace only —
 no independent self-update mechanism, no manually shared `.vsix`
-workflow to support. Headroom install is a global-per-host Python venv
+workflow to support. Publishing itself is a local script, not CI/CD
+(`../scripts/publish-vscode.sh` and `../scripts/release-vscode.sh` in
+the root repo — deliberately not committed inside this submodule, since
+they're publish-process tooling for the maintainer, not part of the
+published extension). `publish-vscode.sh` packages and publishes the
+vsix to the Marketplace; `release-vscode.sh` then mirrors that same
+vsix as a GitHub release asset on `studio-vitalyn/easy-headroom-vscode`
+— a changelog/backup artifact only, not an alternate install path.
+Headroom install is a global-per-host Python venv
 (`headroom-ai[proxy,code]`), not a downloaded binary — see "Headroom
 install — Python venv, not a binary".
 
