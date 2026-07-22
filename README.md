@@ -1,6 +1,6 @@
 # easy-headroom
 
-![easy-headroom](assets/splash.png)
+![easy-headroom](https://raw.githubusercontent.com/studio-vitalyn/easy-headroom-vscode/main/assets/splash.png)
 
 Stop hand-rolling your `rtk init` and `headroom wrap claude` setup.
 **easy-headroom** is a VS Code extension that installs and configures
