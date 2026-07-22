@@ -1,0 +1,176 @@
+{
+  "name": "easy-headroom",
+  "displayName": "Easy Headroom",
+  "description": "Installs, configures, and manages RTK and Headroom automatically to reduce token consumption for Claude Code, Gemini CLI, and Codex CLI.",
+  "version": "0.1.0",
+  "publisher": "Vitalyn",
+  "author": {
+    "name": "Vitalyn",
+    "url": "https://vitalyn.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/studio-vitalyn/easy-headroom-vscode.git"
+  },
+  "license": "AGPL-3.0-or-later",
+  "icon": "assets/icon.png",
+  "galleryBanner": {
+    "color": "#0b0e11",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": [
+      {
+        "title": "easy-headroom",
+        "properties": {
+          "easy-headroom.projectName": {
+            "type": "string",
+            "default": "",
+            "scope": "resource",
+            "description": "Project name used for Headroom's per-project attribution (/p/<slug>). Empty = auto-detected from the workspace/folder name. Set this (e.g. in a committed .vscode/settings.json) when that auto-detected name doesn't match the name you want Headroom to report under."
+          }
+        }
+      },
+      {
+        "title": "easy-headroom › RTK",
+        "properties": {
+          "easy-headroom.rtk.enabled": {
+            "type": "boolean",
+            "default": true,
+            "scope": "machine-overridable",
+            "description": "Install and enable RTK (shell output compression)"
+          },
+          "easy-headroom.rtk.agents": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "claude",
+                "gemini",
+                "codex"
+              ]
+            },
+            "default": [
+              "claude"
+            ],
+            "scope": "machine-overridable",
+            "description": "Which CLI agents to set up RTK for (Claude Code, Gemini CLI, Codex CLI). Each is installed/patched independently."
+          },
+          "easy-headroom.rtk.pinnedVersion": {
+            "type": "string",
+            "default": "",
+            "scope": "machine-overridable",
+            "description": "Pin RTK to a specific version (e.g. v0.43.0). Empty = always install/update to latest. Use the 'easy-headroom: Select RTK Version' command to pick from detected releases."
+          }
+        }
+      },
+      {
+        "title": "easy-headroom › Headroom",
+        "properties": {
+          "easy-headroom.headroom.enabled": {
+            "type": "boolean",
+            "default": false,
+            "scope": "machine-overridable",
+            "description": "Install and/or use Headroom (proxy compression + cache + output shaping)"
+          },
+          "easy-headroom.headroom.mode": {
+            "type": "string",
+            "enum": [
+              "local",
+              "remote"
+            ],
+            "default": "local",
+            "scope": "machine-overridable",
+            "description": "local = headroom proxy spawned and managed on this machine ; remote = use an already-deployed Headroom proxy elsewhere"
+          },
+          "easy-headroom.headroom.remoteUrl": {
+            "type": "string",
+            "default": "",
+            "scope": "machine",
+            "description": "URL of the remote Headroom proxy (required if mode = remote)"
+          },
+          "easy-headroom.headroom.proxyToken": {
+            "type": "string",
+            "default": "",
+            "scope": "machine",
+            "description": "Token for the remote Headroom bundle (headroom.remoteUrl), must match its HEADROOM_PROXY_TOKEN — sent as X-Headroom-Proxy-Token on both the RTK stats reporting endpoint and every proxied Claude Code request (via ANTHROPIC_CUSTOM_HEADERS, remote mode only)"
+          },
+          "easy-headroom.headroom.localPort": {
+            "type": "number",
+            "default": 8787,
+            "scope": "machine-overridable",
+            "description": "Local Headroom proxy port (mode = local only)"
+          },
+          "easy-headroom.headroom.pinnedVersion": {
+            "type": "string",
+            "default": "",
+            "scope": "machine-overridable",
+            "description": "Pin Headroom to a specific version (e.g. 0.31.0). Empty = always install/update to latest. Use the 'easy-headroom: Select Headroom Version' command to pick from detected releases."
+          }
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "easy-headroom.openDashboard",
+        "title": "easy-headroom: Open Dashboard"
+      },
+      {
+        "command": "easy-headroom.openSettings",
+        "title": "easy-headroom: Open Settings"
+      },
+      {
+        "command": "easy-headroom.statusBarMenu",
+        "title": "easy-headroom: Status Bar Menu"
+      },
+      {
+        "command": "easy-headroom.stopProxy",
+        "title": "easy-headroom: Stop Proxy Daemon"
+      },
+      {
+        "command": "easy-headroom.selectRtkVersion",
+        "title": "easy-headroom: Select RTK Version"
+      },
+      {
+        "command": "easy-headroom.selectHeadroomVersion",
+        "title": "easy-headroom: Select Headroom Version"
+      },
+      {
+        "command": "easy-headroom.uninstallCleanup",
+        "title": "easy-headroom: Uninstall / Clean Up"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "node esbuild.js --production",
+    "typecheck": "tsc --noEmit -p .",
+    "vscode:prepublish": "npm run package"
+  },
+  "dependencies": {
+    "sql.js": "^1.14.1",
+    "tar": "^7.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/sql.js": "^1.4.11",
+    "@types/tar": "^6.1.13",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.0"
+  }
+}
