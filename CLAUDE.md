@@ -59,8 +59,9 @@ extension must not pretend otherwise:
   and all of `claudeSettings.ts` remain intentionally Claude-only.
 
 A separate, optional project — **`docker-easy-headroom`** — provides a
-Docker bundle for teams who want a centralized Headroom instance shared
-across multiple machines/containers. It has a first working cut — see
+Docker bundle to run Headroom on a centralized instance shared across
+multiple machines/containers, aggregating RTK savings from all of them
+onto one dashboard. It has a first working cut — see
 `../docker/CLAUDE.md`. Logically a separate project, and physically a
 separate GitHub repo (`studio-vitalyn/easy-headroom-docker`), consumed
 here as a git submodule at `easy-headroom/docker/` — this extension
@@ -92,7 +93,7 @@ easy-headroom/
 ├── vscode/       → this project — the VS Code extension (main product)
 └── docker/       → docker-easy-headroom (first working cut) — optional
                      Docker bundle to self-host Headroom + the RTK
-                     aggregation service, for teams / multi-machine setups
+                     aggregation service, for multi-host setups
 ```
 
 A solo dev only needs `vscode/` (local mode, everything runs on their
@@ -117,7 +118,8 @@ shared across multiple machines, and is designed separately.
      machine**, not one per VS Code window — see "`headroom proxy`
      daemon lifecycle" below.
    - `remote`: the extension just points `ANTHROPIC_BASE_URL` at an
-     existing Headroom proxy (team using a deployed `docker-easy-headroom`).
+     existing Headroom proxy (a centralized instance deployed via
+     `docker-easy-headroom`).
 4. **Per-project attribution** — every window's `ANTHROPIC_BASE_URL`
    is suffixed with `/p/<project-slug>` (derived from
    `easy-headroom.projectName` if set, else the VS Code workspace

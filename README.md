@@ -19,10 +19,10 @@ and API call.
   `ANTHROPIC_BASE_URL` at itself.
 - **Wires up the hooks** (`rtk init --global --auto-patch`, `headroom wrap claude`)
   safely — won't re-patch your config on every restart.
-- **Works solo or as a team.** Use it standalone on your laptop, or
-  point it at a shared, centralized Headroom instance your team
-  already runs — see [`easy-headroom-docker`](https://github.com/studio-vitalyn/easy-headroom-docker)
-  below for a ready-made way to deploy that shared instance.
+- **Works on one host or several.** Use it standalone on your laptop, or
+  point it at a centralized Headroom instance to aggregate RTK savings
+  across every host — see [`easy-headroom-docker`](https://github.com/studio-vitalyn/easy-headroom-docker)
+  below for a ready-made way to deploy that instance.
 - **One click to your dashboard**, right from the status bar.
 - **Stays out of your way.** Don't want Headroom? Enable RTK only —
   zero network config touched.
@@ -48,17 +48,17 @@ code --install-extension easy-headroom
 3. If you enable Headroom, choose a mode:
    - **local** — the extension runs the proxy for you, right on your
      machine. Nothing else to set up.
-   - **remote** — already have a Headroom instance running for your
-     team? Just point `remoteUrl` at it.
+   - **remote** — already have a centralized Headroom instance running?
+     Just point `remoteUrl` at it.
 4. Click the status bar item any time to jump to your savings
    dashboard.
 
-## Running Headroom for a team?
+## Running Headroom on multiple hosts?
 
 See [`easy-headroom-docker`](https://github.com/studio-vitalyn/easy-headroom-docker) —
 a logically separate project that self-hosts Headroom plus a small
-aggregation service, so everyone's RTK savings roll up into one shared
-dashboard, even across several machines.
+aggregation service, so RTK savings from every host roll up into one
+shared dashboard.
 
 ## Why this exists
 
