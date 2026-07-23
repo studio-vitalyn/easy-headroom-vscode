@@ -1,9 +1,9 @@
-# easy-headroom
+# easyHeadroom
 
-![easy-headroom](https://raw.githubusercontent.com/studio-vitalyn/easy-headroom-vscode/main/assets/splash.png)
+![easyHeadroom](https://raw.githubusercontent.com/studio-vitalyn/easy-headroom-vscode/main/assets/splash.png)
 
 Stop hand-rolling your `rtk init` and `headroom wrap claude` setup.
-**easy-headroom** is a VS Code extension that installs and configures
+**easyHeadroom** is a VS Code extension that installs and configures
 [RTK](https://github.com/rtk-ai/rtk) and
 [Headroom](https://github.com/headroomlabs-ai/headroom) for you, so
 your CLI coding agent burns far fewer tokens on every shell command
@@ -23,16 +23,20 @@ and API call.
   point it at a centralized Headroom instance to aggregate RTK savings
   across every host — see [`easy-headroom-docker`](https://github.com/studio-vitalyn/easy-headroom-docker)
   below for a ready-made way to deploy that instance.
-- **One click to your dashboard**, right from the status bar.
+- **One click to your dashboard**, right from the status bar —
+  including a CO₂ tab estimating the carbon footprint avoided by your
+  savings.
 - **Stays out of your way.** Don't want Headroom? Enable RTK only —
   zero network config touched.
 
 ## Install
 
-Search for **easy-headroom** in the VS Code Extensions view, or:
+[![Install in VS Code](https://img.shields.io/badge/VS%20Code-Install-blue?logo=visualstudiocode)](vscode:extension/Vitalyn.easy-headroom)
+
+Or search for **easy-headroom** in the VS Code Extensions view, or:
 
 ```bash
-code --install-extension easy-headroom
+code --install-extension Vitalyn.easy-headroom
 ```
 
 ## Quick start
