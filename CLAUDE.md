@@ -458,10 +458,16 @@ would both try to bind the same port and collide.
 
 ### Status bar
 
-- Dynamic icon based on the shared daemon's state: proxy up
-  (green/check), RTK not yet initialized (warning), connection error
-  (error) — based on a periodic `/health` or `/readyz` ping.
-- **Broken state (red background, click → settings instead of dashboard)**:
+- Single brand icon, `$(shield)`, recolored rather than swapped between
+  states — no separate check/error glyph and no `easy-headroom` text
+  label next to it (dropped in favor of the icon alone). Stands in for
+  `assets/easy-headroom-ico.svg`: VS Code status bar items only render
+  Codicons or icons contributed via `contributes.icons` (which needs a
+  built icon-font, `.woff`/`.ttf`, not a raw SVG) in `text` — there is
+  no API to drop an arbitrary SVG/image into a status bar item. No
+  icon-font build pipeline exists for this extension; revisit if exact
+  custom-icon fidelity becomes worth the added build step.
+- **Health color, click → settings instead of dashboard when broken**:
   deliberately avoids a popup for this (see "Setup guidance" below) —
   instead `HeadroomStatusBar.isBroken()` (`statusBar.ts`) flags the item
   as broken when either independent layer can't function, still keeping
@@ -477,12 +483,15 @@ would both try to bind the same port and collide.
     by the time `refresh()` runs, not "still starting up" — `ensureRunning`
     already attempted a spawn once during `activate()` before the status
     bar's own polling begins.
-  - When broken: `item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground')`
-    (the only background colors VS Code honors on status bar items are
-    `errorBackground`/`warningBackground` — anything else is silently
-    ignored). The click target itself doesn't change with broken state
-    (see below) — both Dashboard and Settings are always one click away
-    either way, so there's no need to switch the command based on state.
+  - `item.color = new vscode.ThemeColor(broken ? 'charts.red' : 'charts.green')`
+    — unlike `backgroundColor` (restricted by VS Code to
+    `statusBarItem.errorBackground`/`warningBackground` only, anything
+    else silently ignored), the `color` property accepts any
+    `ThemeColor`/string, so the icon itself goes green/red rather than
+    sitting on a colored pill. The click target itself doesn't change
+    with broken state (see below) — both Dashboard and Settings are
+    always one click away either way, so there's no need to switch the
+    command based on state.
 - **Content** (VS Code status bar items can't render real
   charts/canvas — text + Codicons only):
   - Bar text: compact numeric summary (e.g. tokens/€ saved), optionally
@@ -550,13 +559,24 @@ by `rtkStats.ts`. Whether each is available is computed separately —
 reads are both "RTK is available", independent of whether the
 Headroom proxy itself is configured).
 
-- **Tab bar only when both are available.** `showTabs = headroomAvailable
-  && rtkAvailable` gates the entire `#tabbar` block in
-  `renderDashboardHtml()`. If only one source is configured, that
-  single view renders directly with no switcher UI at all — there's
-  nothing to switch between. This is deliberate, not an oversight: a
-  tab bar with one dead/greyed-out button would be worse than no tab
-  bar.
+- **Tab buttons only when more than one view is available.**
+  `showTabs = tabOrder.length > 1` (`tabOrder` built from
+  headroom/rtk/co2 availability, in that fixed order) gates the
+  `.tab-btn` buttons inside `#tabbar`. If only one source is
+  configured, that single view renders directly with no switcher UI —
+  there's nothing to switch between. This is deliberate, not an
+  oversight: a tab bar with one dead/greyed-out button would be worse
+  than no tab bar.
+- **`#tabbar` itself always renders**, independent of `showTabs` — its
+  first child is a `.brand-block` (extension icon + `v<version>`,
+  read via `context.extension.packageJSON.version` rather than an
+  imported `package.json`, since `tsconfig.json`'s `rootDir: "src"`
+  rules out reaching one directory up). This is branding, not a tab —
+  it's not clickable and isn't part of the `tabs`/`views` maps in the
+  inline script. The icon reaches the webview via
+  `panel.webview.asWebviewUri(...)` + `localResourceRoots: [.../assets]`
+  on the panel, with a matching `img-src ${cspSource}` CSP directive —
+  the default `default-src 'none'` blocks image loads otherwise.
 - **No iframe for the RTK tab** — unlike Headroom's dashboard, RTK's
   view is plain HTML/CSS built into the webview document itself
   (cards + bar charts drawn as `<div>` elements, no charting library).
@@ -590,6 +610,108 @@ Headroom proxy itself is configured).
   (`npm run typecheck`, `npm run compile`) but has not been exercised
   in a running Extension Development Host — treat rendering/UX
   correctness as unverified until manually tested.
+
+### CO2 tab (rides along with Headroom, not RTK)
+
+Its own dashboard tab (`#view-co2` in `renderDashboardHtml()`), shown
+whenever the Headroom tab is (`co2Available = headroomAvailable`) —
+folded into the same tab-order/`showTabs` logic as headroom/rtk rather
+than a separate availability check. Tab order is fixed as
+headroom → rtk → co2 (`tabOrder` in `renderDashboardHtml()`) — CO2 is
+the derived/secondary metric, so it sits last after the two tabs with
+their own raw data sources. Deliberately **not** available
+off RTK alone: RTK's schema (client SQLite and the Docker aggregator's
+`commands` table) has no model column at all, so it has no way to
+attribute tokens to a model, and per-model attribution is the whole
+basis for a carbon estimate. Headroom, being an API-layer proxy rather
+than a shell wrapper, does see the `model` field per request and
+already tracks per-model token stats — this piggybacks on that, not on
+anything new.
+
+The tab has three parts: a static methodology/disclaimer paragraph, a
+headline comparison (total sent vs. avoided), and a per-model
+table with inline mini-bars (`co2-cell-fill`) — all fed by the same
+`carbon` object already computed server-side per poll, specifically
+its `perModel` array (previously computed but unused before this tab
+existed). Sent uses `--vscode-charts-blue`, avoided (Headroom)
+`--vscode-charts-green`, consistently across the headline bars, the
+legend, and the table columns — deliberately vscode's own theme
+tokens rather than a hardcoded hex palette, so it re-themes with the
+editor automatically; this is the exception to running the `dataviz`
+skill's palette validator (which needs concrete hex), consistent with
+this file's other charts (e.g. the RTK trend chart) already doing the
+same. The two former inline cards on the Headroom tab were removed in
+favor of this tab — not duplicated — to avoid maintaining the same
+numbers in two places.
+
+- **RTK's savings are allocated across models, not shown separately**:
+  RTK has zero per-model attribution (see above), but its aggregate
+  `saved` tokens dwarf Headroom's own — showing only Headroom's figure
+  understated the real savings. `renderCo2(carbon, rtkTotalSaved)`
+  (inline webview script) allocates RTK's model-agnostic saved-token
+  pool across models using each model's *share of Headroom's sent
+  tokens* as a proxy distribution, then applies that same model's
+  `sentGrams / sentTokens` coefficient (backed out client-side — no
+  new backend payload) to convert the allocated share to grams
+  (`perModelRtkAvoided`, one entry per `carbon.perModel` row). This
+  is a proxy on top of a proxy — RTK's usage mix may not actually match
+  Headroom's — so it renders as its own column in the per-model table
+  ("CO₂ avoided (RTK, est.)", `--vscode-charts-purple`, showing "–"
+  per row when not yet computable), its own third headline row, and
+  its own legend swatch — never merged into the green Headroom
+  figures. Only computed when both `rtkTotalSaved > 0` and Headroom
+  has sent tokens to build a distribution from; otherwise the
+  headline/legend fall back to 2 rows/swatches (same as before this
+  feature) and the table column reads "–" throughout. The tab-bar
+  metric (`tab-co2-metric`) sums Headroom's and RTK's avoided grams
+  into one combined figure. A dedicated italic disclaimer paragraph
+  (`#co2-calc-disclaimer`, below the table, empty until RTK data
+  allocable) spells out the extra approximation layer — kept out of
+  the top intro paragraph so it only appears once the RTK figures
+  are actually showing.
+
+- **Data source, no new request**: `computeCarbonEstimate()`
+  (`carbonFootprint.ts`) is fed `persistent_savings.by_model` from the
+  same raw `/stats` JSON `onHeadroomStats` already taps in
+  `startDashboardProxy` — not `savings.by_model` (a same-named but
+  different, decoy field: just `{model: request_count}`, no token
+  data). `persistent_savings` is Headroom's `SavingsTracker
+  .stats_preview()` and its `by_model` entries carry
+  `tokens_saved`/`total_input_tokens` per model, which is what's
+  multiplied by a coefficient.
+- **Coefficients shipped as a static asset**,
+  `resources/carbon-coefficients.json`, generated by running
+  `scripts/fetch-carbon-coefficients.js` (manual, not part of the
+  build — depends on a third-party page) against
+  https://carbon-llm.com/methodology's published per-model g CO2e/1k
+  token table, Claude rows only. Copied into `dist/` by
+  `esbuild.js`'s `copyCarbonCoefficients()`, same convention as
+  `sql-wasm.wasm`.
+- **Model-generation mismatch, handled by design, not by accident**:
+  carbon-llm.com's catalog only goes up to Claude 3/4-era slugs
+  (`claude-3-5-sonnet`, `claude-4-opus`, `claude-4-sonnet`, ...) — it
+  predates whatever's actually live today (e.g. `claude-sonnet-5`), so
+  no current model will ever exact-match. `matchCoefficient()` in
+  `carbonFootprint.ts` falls back by tier (opus/sonnet/haiku substring
+  match → the newest cataloged entry for that tier), forced to
+  `confidence: "estimated"` regardless of what the catalog said for
+  that entry, and falls back again to a generic 0.30 g/1k ("GPT-4
+  class") coefficient for anything that doesn't even match a tier —
+  this is carbon-llm.com's own documented policy for unrecognized
+  slugs, not an invented number.
+- **Framing matters here**: the tab's intro paragraph states up front
+  that this is an indicative, non-official estimate (and, since the
+  RTK-allocation feature, that the RTK figure is a further
+  approximation layered on top). Neither Anthropic nor Headroom
+  publish a per-token carbon figure — don't let any future copy on
+  this tab imply otherwise.
+- **Display text uses "CO₂" (U+2082 subscript two), not "CO2"** —
+  applies to every user-visible string on this tab (tab title, intro
+  paragraph, legend, headline labels, table headers, tooltips). Code
+  identifiers (`renderCo2`, `co2Available`, `.co2-*` classes,
+  `#view-co2`/`#co2-*` ids, the `carbon`/`CarbonEstimate` types in
+  `carbonFootprint.ts`) stay as `co2`/`CO2` — only rendered text
+  changes.
 
 ### Setup guidance — no popups, ever
 
@@ -729,6 +851,16 @@ published extension). `publish-vscode.sh` packages and publishes the
 vsix to the Marketplace; `release-vscode.sh` then mirrors that same
 vsix as a GitHub release asset on `studio-vitalyn/easy-headroom-vscode`
 — a changelog/backup artifact only, not an alternate install path.
+`package.json`'s `version` carries a `-dev` suffix while work is in
+progress (e.g. `0.2.0-dev`), both as a visible "not yet released"
+marker and because it makes an accidental double-publish of an
+unfinished version fail loudly. `publish-vscode.sh` strips it (vsce
+requires a strict `x.y.z` version anyway), packages/publishes under
+the stripped version, then restores the `-dev` `package.json` via a
+`trap`; bumping to the *next* `-dev` version afterward, to resume
+work, is a manual step. `release-vscode.sh` independently derives the
+same stripped version to find/tag the already-built vsix — it never
+touches `package.json`.
 Headroom install is a global-per-host Python venv
 (`headroom-ai[proxy,code]`), not a downloaded binary — see "Headroom
 install — Python venv, not a binary".

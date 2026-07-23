@@ -15,8 +15,18 @@ function copySqlJsWasm() {
   fs.copyFileSync(src, path.join(destDir, 'sql-wasm.wasm'));
 }
 
+// carbonFootprint.ts reads this via `path.join(__dirname, file)`, same reasoning as the wasm copy
+// above — bundled CJS output's __dirname resolves to dist/ at runtime.
+function copyCarbonCoefficients() {
+  const src = path.join(__dirname, 'resources', 'carbon-coefficients.json');
+  const destDir = path.join(__dirname, 'dist');
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.copyFileSync(src, path.join(destDir, 'carbon-coefficients.json'));
+}
+
 async function main() {
   copySqlJsWasm();
+  copyCarbonCoefficients();
   const ctx = await esbuild.context({
     entryPoints: ['src/extension.ts'],
     bundle: true,

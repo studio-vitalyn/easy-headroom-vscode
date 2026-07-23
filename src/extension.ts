@@ -71,7 +71,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await daemon.applyEnvironment();
   daemon.startLifecycleTimers();
 
-  statusBar = new HeadroomStatusBar(rtkBinPath, rtkFailures);
+  statusBar = new HeadroomStatusBar(rtkBinPath, rtkFailures, context.extension.packageJSON.version);
   statusBar.start();
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
 

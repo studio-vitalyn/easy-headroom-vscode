@@ -11,6 +11,7 @@ import { listRtkReleases, listHeadroomReleases } from './versions';
 import { removeHeadroomWrap, clearProjectEnv } from './claudeSettings';
 import { removeRtkIntegration } from './rtkAgents';
 import { getRtkStats, getRtkProjects } from './rtkStats';
+import { computeCarbonEstimate, type CarbonEstimate } from './carbonFootprint';
 
 let dashboardPanel: vscode.WebviewPanel | undefined;
 
@@ -129,6 +130,7 @@ interface HeadroomLiveStats {
   cacheHitRate?: number;
   avgLatencyMs?: number;
   history: number[];
+  carbon?: CarbonEstimate;
 }
 
 const STATS_HISTORY_POINTS = 40;
@@ -138,7 +140,7 @@ const STATS_HISTORY_POINTS = 40;
  * read defensively in this one place, so a field rename on Headroom's side only breaks this
  * function instead of scattering optional-chaining across the webview script.
  */
-function extractHeadroomStats(raw: unknown): HeadroomLiveStats {
+async function extractHeadroomStats(raw: unknown): Promise<HeadroomLiveStats> {
   const r = raw as Record<string, any> | null | undefined;
   const summary = r?.summary;
   const history: number[] = Array.isArray(r?.savings_history)
@@ -146,6 +148,18 @@ function extractHeadroomStats(raw: unknown): HeadroomLiveStats {
         .slice(-STATS_HISTORY_POINTS)
         .map((p: unknown) => (Array.isArray(p) && typeof p[1] === 'number' ? p[1] : 0))
     : [];
+
+  // `persistent_savings.by_model` (== headroom's own SavingsTracker.stats_preview()) is the rich,
+  // per-model breakdown (tokens_saved/total_input_tokens/...) — not `savings.by_model`, which is
+  // just a flat {model: request_count} dict with no token data. RTK has no model column at all
+  // (see rtkDb.ts), so Headroom is the only source that can attribute tokens to a model.
+  let carbon: CarbonEstimate | undefined;
+  try {
+    carbon = await computeCarbonEstimate(r?.persistent_savings?.by_model);
+  } catch {
+    // carbon-coefficients.json missing/corrupt — skip the CO2 card, rest of the dashboard is unaffected
+  }
+
   return {
     requests: typeof summary?.api_requests === 'number' ? summary.api_requests : undefined,
     costSavedUsd: typeof summary?.cost?.total_saved_usd === 'number' ? summary.cost.total_saved_usd : undefined,
@@ -153,20 +167,36 @@ function extractHeadroomStats(raw: unknown): HeadroomLiveStats {
     cacheHitRate: typeof r?.prefix_cache?.totals?.hit_rate === 'number' ? r.prefix_cache.totals.hit_rate : undefined,
     avgLatencyMs: typeof r?.latency?.average_ms === 'number' ? r.latency.average_ms : undefined,
     history,
+    carbon,
   };
 }
 
-function renderDashboardHtml(opts: { headroomAvailable: boolean; rtkAvailable: boolean; externalOrigin: string }): string {
-  const { headroomAvailable, rtkAvailable, externalOrigin } = opts;
+function renderDashboardHtml(opts: {
+  headroomAvailable: boolean;
+  rtkAvailable: boolean;
+  externalOrigin: string;
+  iconUri: string;
+  cspSource: string;
+}): string {
+  const { headroomAvailable, rtkAvailable, externalOrigin, iconUri, cspSource } = opts;
   const nonce = getNonce();
-  // Only show a tab switcher when both sources are actually configured — otherwise there's
-  // nothing to switch between, so skip straight to whichever single view applies.
-  const showTabs = headroomAvailable && rtkAvailable;
-  const defaultTab = headroomAvailable ? 'headroom' : 'rtk';
+  // CO2 needs Headroom's per-model token breakdown (see extractHeadroomStats), so it rides along
+  // with the Headroom tab rather than being its own top-level availability check.
+  const co2Available = headroomAvailable;
+  // Only show a tab switcher when more than one view is actually available — otherwise there's
+  // nothing to switch between, so skip straight to whichever single view applies. CO2 rides in
+  // third position, after both raw-data tabs.
+  const tabOrder: Array<'headroom' | 'rtk' | 'co2'> = [];
+  if (headroomAvailable) tabOrder.push('headroom');
+  if (rtkAvailable) tabOrder.push('rtk');
+  if (co2Available) tabOrder.push('co2');
+  const showTabs = tabOrder.length > 1;
+  const defaultTab = tabOrder[0];
   const csp = [
     "default-src 'none'",
     "style-src 'unsafe-inline'",
     `script-src 'nonce-${nonce}'`,
+    `img-src ${cspSource}`,
     headroomAvailable ? `frame-src ${externalOrigin}` : '',
   ]
     .filter(Boolean)
@@ -178,7 +208,9 @@ function renderDashboardHtml(opts: { headroomAvailable: boolean; rtkAvailable: b
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <style>
   html, body { height: 100%; margin: 0; padding: 0; font-family: var(--vscode-font-family); color: var(--vscode-foreground); display: flex; flex-direction: column; }
-  #tabbar { display: flex; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--vscode-widget-border); flex: 0 0 auto; }
+  #tabbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--vscode-widget-border); flex: 0 0 auto; }
+  .brand-block { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 2px 10px 2px 2px; margin-right: 4px; border-right: 1px solid var(--vscode-widget-border); }
+  .brand-logo { width: 20px; height: 20px; display: block; }
   .tab-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 4px 12px; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--vscode-foreground); cursor: pointer; font-family: inherit; }
   .tab-btn.active { background: var(--vscode-list-activeSelectionBackground); border-color: var(--vscode-focusBorder); }
   .tab-btn .tab-title { font-weight: 600; font-size: 12px; }
@@ -233,22 +265,45 @@ function renderDashboardHtml(opts: { headroomAvailable: boolean; rtkAvailable: b
   th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--vscode-widget-border); }
   .empty { padding: 24px 14px; opacity: 0.7; font-size: 13px; }
   .hidden { display: none !important; }
+  .co2-intro { margin: 12px 14px 14px; font-size: 12px; opacity: 0.85; line-height: 1.5; max-width: 640px; }
+  .co2-intro a { color: var(--vscode-textLink-foreground); }
+  .co2-legend { display: flex; gap: 16px; margin: 0 14px 12px; font-size: 11px; opacity: 0.85; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .co2-headline { display: flex; flex-direction: column; gap: 8px; margin: 0 14px 20px; max-width: 480px; }
+  .co2-headline-row { display: flex; align-items: center; gap: 8px; }
+  .co2-headline-label { width: 128px; font-size: 11px; opacity: 0.8; flex: 0 0 auto; }
+  .co2-headline-track { flex: 1; height: 14px; background: var(--vscode-editorWidget-background); border-radius: 4px; overflow: hidden; }
+  .co2-headline-fill { height: 100%; border-radius: 4px; }
+  .co2-headline-value { width: 90px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .co2-cell-bar { display: flex; align-items: center; gap: 6px; }
+  .co2-cell-track { width: 60px; height: 8px; background: var(--vscode-editorWidget-background); border-radius: 3px; overflow: hidden; flex: 0 0 auto; }
+  .co2-cell-fill { height: 100%; border-radius: 3px; }
+  .conf-estimated { opacity: 0.65; font-style: italic; }
+  .co2-calc-disclaimer { margin: 8px 14px 20px; font-size: 11px; font-style: italic; opacity: 0.7; max-width: 640px; }
 </style>
 </head>
 <body>
+<div id="tabbar">
+  <div class="brand-block">
+    <img class="brand-logo" src="${iconUri}" alt="easyHeadroom" />
+  </div>
 ${
   showTabs
-    ? `<div id="tabbar">
-  <button class="tab-btn${defaultTab === 'headroom' ? ' active' : ''}" id="tab-headroom" data-tab="headroom">
+    ? `${headroomAvailable ? `  <button class="tab-btn${defaultTab === 'headroom' ? ' active' : ''}" id="tab-headroom" data-tab="headroom">
     <span class="tab-title">Headroom</span>
-  </button>
-  <button class="tab-btn${defaultTab === 'rtk' ? ' active' : ''}" id="tab-rtk" data-tab="rtk">
+  </button>` : ''}
+${rtkAvailable ? `  <button class="tab-btn${defaultTab === 'rtk' ? ' active' : ''}" id="tab-rtk" data-tab="rtk">
     <span class="tab-title">RTK</span>
     <span class="tab-metric" id="tab-rtk-metric">…</span>
-  </button>
-</div>`
+  </button>` : ''}
+${co2Available ? `  <button class="tab-btn${defaultTab === 'co2' ? ' active' : ''}" id="tab-co2" data-tab="co2">
+    <span class="tab-title">CO₂</span>
+    <span class="tab-metric" id="tab-co2-metric">…</span>
+  </button>` : ''}`
     : ''
 }
+</div>
 <div id="views">
 ${
   headroomAvailable
@@ -280,12 +335,34 @@ ${
   </div>`
     : ''
 }
+${
+  co2Available
+    ? `  <div class="view${showTabs && defaultTab !== 'co2' ? ' hidden' : ''}" id="view-co2">
+    <div class="co2-intro">
+      <p>Indicative CO₂ estimate — not an official figure. Anthropic does not publish per-token
+      carbon data. Grams below are derived from Headroom's own per-model token counts combined
+      with public coefficients from <a href="https://carbon-llm.com/methodology">carbon-llm.com/methodology</a>.
+      When a model isn't in that catalog, the closest same-tier Claude model's coefficient is used
+      instead (marked "estimated"), falling back to a generic coefficient if no tier match exists.
+      Treat these numbers as a rough order of magnitude, not a measurement.</p>
+    </div>
+    <div class="empty hidden" id="co2-empty">No CO₂ data yet — waiting for Headroom request activity.</div>
+    <div class="hidden" id="co2-content">
+      <div class="co2-legend" id="co2-legend"></div>
+      <div class="co2-headline" id="co2-headline"></div>
+      <div class="rtk-section-title">By model</div>
+      <table id="co2-table"><thead><tr><th>Model</th><th>Confidence</th><th>CO₂ sent</th><th>CO₂ avoided (Headroom)</th><th>CO₂ avoided (RTK, est.)</th></tr></thead><tbody></tbody></table>
+      <p class="co2-calc-disclaimer" id="co2-calc-disclaimer"></p>
+    </div>
+  </div>`
+    : ''
+}
 </div>
 <script nonce="${nonce}">
 (function() {
   const vscode = acquireVsCodeApi();
   const tabs = Array.from(document.querySelectorAll('.tab-btn'));
-  const views = { headroom: document.getElementById('view-headroom'), rtk: document.getElementById('view-rtk') };
+  const views = { headroom: document.getElementById('view-headroom'), rtk: document.getElementById('view-rtk'), co2: document.getElementById('view-co2') };
   tabs.forEach((btn) => btn.addEventListener('click', () => {
     const tab = btn.dataset.tab;
     tabs.forEach((b) => b.classList.toggle('active', b === btn));
@@ -294,6 +371,10 @@ ${
 
   const projectSelect = document.getElementById('project-select');
   let projectsPopulated = false;
+  // Cached across independent message streams (headroom:stats / rtk:data) so the CO2 tab can
+  // combine them — see renderCo2().
+  let latestCarbon = null;
+  let latestRtkSaved;
   if (projectSelect) {
     projectSelect.addEventListener('change', () => {
       vscode.postMessage({ type: 'rtk:selectProject', project: projectSelect.value || null });
@@ -317,6 +398,15 @@ ${
   function fmtPct(n) {
     return (n === undefined || n === null) ? '–' : (Math.round(n * 10) / 10) + '%';
   }
+  function fmtGrams(g) {
+    if (g === undefined || g === null) return '–';
+    return g >= 1000 ? (Math.round(g / 10) / 100) + ' kg CO₂e' : Math.round(g) + ' g CO₂e';
+  }
+  // Compact form for tight spaces (tab-bar metric) — no space, no "CO2e" unit spelled out.
+  function fmtGramsShort(g) {
+    if (g === undefined || g === null) return '–';
+    return g >= 1000 ? (Math.round(g / 10) / 100) + 'kg' : Math.round(g) + 'g';
+  }
   function fmtUsd(n) {
     return (n === undefined || n === null) ? '–' : '$' + (Math.round(n * 100) / 100).toLocaleString();
   }
@@ -338,8 +428,8 @@ ${
     ];
     const history = stats.history || [];
     const spark = buildTrendAreaSvg(history, 'hr-spark-grad', '--vscode-charts-blue', 1.25);
-    el.innerHTML = cards.map(([label, value]) =>
-      '<div class="card"><div class="value">' + esc(value) + '</div><div class="label">' + esc(label) + '</div></div>'
+    el.innerHTML = cards.map(([label, value, tooltip]) =>
+      '<div class="card"' + (tooltip ? ' title="' + esc(tooltip) + '"' : '') + '><div class="value">' + esc(value) + '</div><div class="label">' + esc(label) + '</div></div>'
     ).join('') + (history.length ? '<div class="card spark-card"><div class="spark">' + spark + '</div><div class="label">Recent savings</div></div>' : '');
   }
 
@@ -365,6 +455,83 @@ ${
       + '<path d="' + areaPath + '" fill="url(#' + gradId + ')" stroke="none"/>'
       + '<path d="' + linePath + '" fill="none" stroke="var(' + colorVar + ')" stroke-width="' + (strokeWidth || 1.5) + '" vector-effect="non-scaling-stroke"/>'
       + '</svg>';
+  }
+
+  function renderCo2(carbon, rtkTotalSaved) {
+    const empty = document.getElementById('co2-empty');
+    const content = document.getElementById('co2-content');
+    if (!empty || !content) return;
+    if (!carbon || !carbon.perModel || carbon.perModel.length === 0) {
+      empty.classList.remove('hidden');
+      content.classList.add('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    content.classList.remove('hidden');
+
+    // RTK has no per-model attribution (see carbonFootprint.ts): its saved-token total is
+    // allocated across models using Headroom's own sent-token mix as the best available proxy,
+    // backing out each model's g/token coefficient from its existing sent totals.
+    const totalSentTokens = carbon.perModel.reduce((sum, m) => sum + m.sentTokens, 0);
+    const perModelRtkAvoided = (rtkTotalSaved > 0 && totalSentTokens > 0)
+      ? carbon.perModel.map((m) => {
+          if (!m.sentTokens) return 0;
+          const coeffGramsPerToken = m.sentGrams / m.sentTokens;
+          const weight = m.sentTokens / totalSentTokens;
+          return rtkTotalSaved * weight * coeffGramsPerToken;
+        })
+      : null;
+    const rtkAvoidedGrams = perModelRtkAvoided ? perModelRtkAvoided.reduce((a, b) => a + b, 0) : undefined;
+
+    const legendEl = document.getElementById('co2-legend');
+    if (legendEl) {
+      const legendItem = (colorVar, label) =>
+        '<span class="legend-item"><span class="legend-swatch" style="background: var(' + colorVar + ')"></span>' + esc(label) + '</span>';
+      legendEl.innerHTML = legendItem('--vscode-charts-blue', 'CO₂ sent')
+        + legendItem('--vscode-charts-green', 'CO₂ avoided (Headroom)')
+        + (rtkAvoidedGrams !== undefined ? legendItem('--vscode-charts-purple', 'CO₂ avoided (RTK, est.)') : '');
+    }
+
+    const headlineEl = document.getElementById('co2-headline');
+    if (headlineEl) {
+      const maxHeadline = Math.max(1, carbon.totalSentGrams, carbon.totalAvoidedGrams, rtkAvoidedGrams || 0);
+      const headlineRow = (label, grams, colorVar) =>
+        '<div class="co2-headline-row"><div class="co2-headline-label">' + esc(label) + '</div>'
+        + '<div class="co2-headline-track"><div class="co2-headline-fill" style="width: ' + Math.max(2, (grams / maxHeadline) * 100) + '%; background: var(' + colorVar + ')"></div></div>'
+        + '<div class="co2-headline-value">' + esc(fmtGrams(grams)) + '</div></div>';
+      headlineEl.innerHTML = headlineRow('Sent', carbon.totalSentGrams, '--vscode-charts-blue')
+        + headlineRow('Avoided', carbon.totalAvoidedGrams, '--vscode-charts-green')
+        + (rtkAvoidedGrams !== undefined ? headlineRow('Avoided (RTK, est.)', rtkAvoidedGrams, '--vscode-charts-purple') : '');
+    }
+
+    const tbody = document.querySelector('#co2-table tbody');
+    if (tbody) {
+      const maxSent = Math.max(1, ...carbon.perModel.map((m) => m.sentGrams));
+      const maxAvoided = Math.max(1, ...carbon.perModel.map((m) => m.avoidedGrams));
+      const maxRtkAvoided = Math.max(1, ...(perModelRtkAvoided || [0]));
+      const barCell = (grams, max, colorVar) =>
+        '<td><div class="co2-cell-bar"><div class="co2-cell-track"><div class="co2-cell-fill" style="width: '
+        + (grams == null ? 0 : Math.max(2, (grams / max) * 100)) + '%; background: var(' + colorVar + ')"></div></div><span>' + esc(fmtGrams(grams)) + '</span></div></td>';
+      tbody.innerHTML = carbon.perModel.map((m, i) => {
+        const confClass = m.confidence === 'estimated' ? ' class="conf-estimated"' : '';
+        const matchTitle = m.matchedCoefficientModel && m.matchedCoefficientModel !== m.model
+          ? ' title="Matched to ' + esc(m.matchedCoefficientModel) + '\\'s coefficient (closest tier, or generic fallback)"'
+          : '';
+        return '<tr' + matchTitle + '><td>' + esc(m.model) + '</td><td><span' + confClass + '>' + esc(m.confidence) + '</span></td>'
+          + barCell(m.sentGrams, maxSent, '--vscode-charts-blue') + barCell(m.avoidedGrams, maxAvoided, '--vscode-charts-green')
+          + barCell(perModelRtkAvoided ? perModelRtkAvoided[i] : null, maxRtkAvoided, '--vscode-charts-purple') + '</tr>';
+      }).join('');
+    }
+
+    const metricEl = document.getElementById('tab-co2-metric');
+    if (metricEl) metricEl.textContent = fmtGramsShort(carbon.totalAvoidedGrams + (rtkAvoidedGrams || 0)) + ' avoided';
+
+    const disclaimerEl = document.getElementById('co2-calc-disclaimer');
+    if (disclaimerEl) {
+      disclaimerEl.textContent = perModelRtkAvoided
+        ? 'RTK\\'s own savings aren\\'t attributed to a model, so its CO₂ avoided (RTK, est.) figure is allocated across models using Headroom\\'s sent-token mix as a proxy — an extra layer of approximation on top of the Headroom figures above.'
+        : '';
+    }
   }
 
   function renderCards(summary) {
@@ -415,6 +582,8 @@ ${
     const msg = event.data;
     if (msg.type === 'headroom:stats') {
       renderHeadroomStats(msg.stats);
+      latestCarbon = (msg.stats && msg.stats.carbon) || null;
+      renderCo2(latestCarbon, latestRtkSaved);
       return;
     }
     if (msg.type !== 'rtk:data') return;
@@ -423,6 +592,7 @@ ${
     if (!msg.stats) {
       if (empty) empty.classList.remove('hidden');
       if (content) content.classList.add('hidden');
+      latestRtkSaved = undefined;
     } else {
       if (empty) empty.classList.add('hidden');
       if (content) content.classList.remove('hidden');
@@ -435,7 +605,12 @@ ${
         const metricEl = document.getElementById('tab-rtk-metric');
         if (metricEl) metricEl.textContent = fmtNum(msg.stats.summary.total_saved) + ' saved · ' + fmtPct(msg.stats.summary.avg_savings_pct);
       }
+      // RTK has no per-model attribution (see carbonFootprint.ts), so its saved-token count is
+      // fed into the CO2 tab as an unattributed pool — renderCo2() allocates it across models
+      // using Headroom's own sent-token mix as the best available proxy.
+      latestRtkSaved = msg.stats.summary ? msg.stats.summary.total_saved : undefined;
     }
+    renderCo2(latestCarbon, latestRtkSaved);
     if (projectSelect && !projectsPopulated && msg.projects && msg.projects.length) {
       msg.projects.forEach((p) => {
         const opt = document.createElement('option');
@@ -456,7 +631,7 @@ ${
 </html>`;
 }
 
-async function openDashboard(): Promise<void> {
+async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
   const headroomAvailable = config.headroomEnabled();
   const rtkAvailable = rtkDashboardAvailable();
 
@@ -484,9 +659,13 @@ async function openDashboard(): Promise<void> {
 
   dashboardPanel = vscode.window.createWebviewPanel(
     'easyHeadroomDashboard',
-    'easy-headroom Dashboard',
+    'easyHeadroom Dashboard',
     vscode.ViewColumn.Active,
-    { enableScripts: true, retainContextWhenHidden: true }
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'assets')],
+    }
   );
   const panel = dashboardPanel;
   panel.onDidDispose(() => {
@@ -497,7 +676,9 @@ async function openDashboard(): Promise<void> {
   let externalOrigin = '';
   if (headroomAvailable) {
     onHeadroomStats = (raw) => {
-      void panel.webview.postMessage({ type: 'headroom:stats', stats: extractHeadroomStats(raw) });
+      void extractHeadroomStats(raw).then((stats) => {
+        void panel.webview.postMessage({ type: 'headroom:stats', stats });
+      });
     };
     const proxyPort = await startDashboardProxy(targetBase);
     const external = await vscode.env.asExternalUri(
@@ -518,14 +699,21 @@ async function openDashboard(): Promise<void> {
     void panel.webview.postMessage({ type: 'rtk:data', stats: stats ?? null, projects, selected: project ?? null });
   });
 
-  panel.webview.html = renderDashboardHtml({ headroomAvailable, rtkAvailable, externalOrigin });
+  const iconUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'assets', 'icon.png'));
+  panel.webview.html = renderDashboardHtml({
+    headroomAvailable,
+    rtkAvailable,
+    externalOrigin,
+    iconUri: iconUri.toString(),
+    cspSource: panel.webview.cspSource,
+  });
 }
 
 function openSettings(): void {
   void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vitalyn.easy-headroom');
 }
 
-async function showStatusBarMenu(): Promise<void> {
+async function showStatusBarMenu(context: vscode.ExtensionContext): Promise<void> {
   const picked = await vscode.window.showQuickPick(
     [
       { label: '$(dashboard) Open Dashboard', action: 'dashboard' as const },
@@ -535,7 +723,7 @@ async function showStatusBarMenu(): Promise<void> {
   );
   if (!picked) return;
   if (picked.action === 'dashboard') {
-    await openDashboard();
+    await openDashboard(context);
   } else {
     openSettings();
   }
@@ -610,9 +798,9 @@ async function connectionTestBeforeRemote(): Promise<void> {
 
 export function registerCommands(context: vscode.ExtensionContext, daemon: ProxyDaemonManager): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('easy-headroom.openDashboard', openDashboard),
+    vscode.commands.registerCommand('easy-headroom.openDashboard', () => openDashboard(context)),
     vscode.commands.registerCommand('easy-headroom.openSettings', openSettings),
-    vscode.commands.registerCommand('easy-headroom.statusBarMenu', showStatusBarMenu),
+    vscode.commands.registerCommand('easy-headroom.statusBarMenu', () => showStatusBarMenu(context)),
     vscode.commands.registerCommand('easy-headroom.stopProxy', () => daemon.stop()),
     vscode.commands.registerCommand('easy-headroom.selectRtkVersion', selectRtkVersion),
     vscode.commands.registerCommand('easy-headroom.selectHeadroomVersion', selectHeadroomVersion),

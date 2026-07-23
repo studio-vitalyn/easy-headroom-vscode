@@ -48,7 +48,8 @@ export class HeadroomStatusBar {
 
   constructor(
     private readonly rtkBinPath: string | undefined,
-    private readonly rtkFailures: RtkInitFailure[] = []
+    private readonly rtkFailures: RtkInitFailure[] = [],
+    private readonly version: string = ''
   ) {
     this.item = vscode.window.createStatusBarItem('easy-headroom.status', vscode.StatusBarAlignment.Right, 100);
   }
@@ -63,20 +64,21 @@ export class HeadroomStatusBar {
     const gain = await readRtkGain(this.rtkBinPath);
     const broken = this.isBroken(state);
 
-    this.item.text = this.renderText(state, gain);
+    this.item.text = this.renderText(gain);
     this.item.tooltip = this.renderTooltip(state, gain);
-    // errorBackground/warningBackground are the only two VS Code supports for status bar items —
-    // any other ThemeColor here is silently ignored. Broken here covers RTK init failures and
-    // Headroom misconfiguration/unreachability independently (see CLAUDE.md's "two independent
-    // layers" principle) but only one button exists, so both feed the same visual signal.
-    this.item.backgroundColor = broken ? new vscode.ThemeColor('statusBarItem.errorBackground') : undefined;
+    // Single brand icon, recolored rather than swapped — covers RTK init failures and Headroom
+    // misconfiguration/unreachability independently (see CLAUDE.md's "two independent layers"
+    // principle) but only one button exists, so both feed the same visual signal.
+    this.item.color = new vscode.ThemeColor(broken ? 'charts.red' : 'charts.green');
     this.item.command = 'easy-headroom.statusBarMenu';
     this.item.show();
   }
 
-  private renderText(state: DaemonState, gain?: RtkGainSummary): string {
-    const icon = this.isBroken(state) ? '$(error)' : '$(check)';
-    const parts = [icon, '$(zap) easy-headroom'];
+  private renderText(gain?: RtkGainSummary): string {
+    // $(shield) stands in for assets/easy-headroom-ico.svg — VS Code status bar items only
+    // render Codicons/contributed icon-fonts in `text`, not arbitrary SVGs, and no icon-font
+    // build pipeline exists for this extension yet.
+    const parts = ['$(shield)'];
     if (gain?.totalSaved !== undefined) {
       parts.push(`${gain.totalSaved.toLocaleString()} saved`);
     }
@@ -88,7 +90,7 @@ export class HeadroomStatusBar {
 
   private renderTooltip(state: DaemonState, gain?: RtkGainSummary): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
-    md.appendMarkdown(`**easy-headroom**\n\n`);
+    md.appendMarkdown(`**easyHeadroom**${this.version ? ` v${this.version}` : ''}\n\n`);
 
     md.appendMarkdown(`RTK: ${config.rtkEnabled() ? 'enabled' : 'disabled'}`);
     if (this.rtkFailures.length > 0) {

@@ -1,0 +1,37 @@
+{
+  "source_url": "https://carbon-llm.com/methodology",
+  "fetched_at": "2026-07-23T08:33:44.854Z",
+  "unit": "g_co2e_per_1k_tokens",
+  "models": {
+    "claude-3-5-sonnet": {
+      "value": 0.85,
+      "confidence": "benchmarked",
+      "source": "Jegham et al. (2025) arXiv:2505.09598v5"
+    },
+    "claude-3-opus": {
+      "value": 0.45,
+      "confidence": "benchmarked",
+      "source": "Empirical Wh/query literature (e.g. CarbonCredits.com survey of model classes)"
+    },
+    "claude-3-haiku": {
+      "value": 0.1,
+      "confidence": "benchmarked",
+      "source": "Same empirical tier as Haiku class (~0.10 gCO₂e/query in secondary studies)"
+    },
+    "claude-4-opus": {
+      "value": 0.8,
+      "confidence": "benchmarked",
+      "source": "Stanford AI Index 2026, Fig. 1.4.6 (Jegham et al. 2025)"
+    },
+    "claude-4-sonnet": {
+      "value": 0.65,
+      "confidence": "estimated",
+      "source": "Derived: Sonnet tier sits below Opus in Anthropic naming. Estimate at ~0.81× Claude 4 Opus pending Jegham data point. Anthropic does not publish per-token PCF."
+    }
+  },
+  "fallback": {
+    "value": 0.3,
+    "confidence": "estimated",
+    "note": "Generic unlisted-model coefficient (GPT-4 class), per carbon-llm.com's own fallback policy for unrecognized model slugs."
+  }
+}
