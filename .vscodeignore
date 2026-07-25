@@ -7,5 +7,6 @@ tsconfig.json
 .gitignore
 CLAUDE.md
 .env
+.tokensave/**
 **/*.map
 **/*.har
