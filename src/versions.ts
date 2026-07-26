@@ -20,6 +20,23 @@ export async function listRtkReleases(): Promise<string[]> {
   return tags;
 }
 
+/** Paginated `GET /repos/aovestdipaperino/tokensave/releases`, latest first — only hit when the user invokes the picker. */
+export async function listTokensaveReleases(): Promise<string[]> {
+  const tags: string[] = [];
+  for (let page = 1; page <= 5; page += 1) {
+    const res = await fetch(
+      `https://api.github.com/repos/aovestdipaperino/tokensave/releases?per_page=100&page=${page}`,
+      { headers: { Accept: 'application/vnd.github+json' } }
+    );
+    if (!res.ok) break;
+    const releases = (await res.json()) as GitHubRelease[];
+    if (releases.length === 0) break;
+    tags.push(...releases.filter((r) => !r.draft && !r.prerelease).map((r) => r.tag_name));
+    if (releases.length < 100) break;
+  }
+  return tags;
+}
+
 interface PyPiPackageInfo {
   releases: Record<string, unknown[]>;
 }

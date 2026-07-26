@@ -59,8 +59,13 @@ export const config = {
   headroomLocalPort: (): number => cfg().get<number>('headroom.localPort', 8787),
   headroomPinnedVersion: (): string => cfg().get<string>('headroom.pinnedVersion', ''),
 
+  tokensaveEnabled: (): boolean => cfg().get<boolean>('tokensave.enabled', true),
+  tokensavePinnedVersion: (): string => cfg().get<string>('tokensave.pinnedVersion', ''),
+
   setRtkPinnedVersion: (version: string): Thenable<void> =>
     cfg().update('rtk.pinnedVersion', version, vscode.ConfigurationTarget.Global),
   setHeadroomPinnedVersion: (version: string): Thenable<void> =>
     cfg().update('headroom.pinnedVersion', version, vscode.ConfigurationTarget.Global),
+  setTokensavePinnedVersion: (version: string): Thenable<void> =>
+    cfg().update('tokensave.pinnedVersion', version, vscode.ConfigurationTarget.Global),
 };

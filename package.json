@@ -2,7 +2,7 @@
   "name": "easy-headroom",
   "displayName": "Easy Headroom",
   "description": "Installs, configures, and manages RTK and Headroom automatically to reduce token consumption for Claude Code, Gemini CLI, and Codex CLI.",
-  "version": "0.2.0-dev",
+  "version": "0.3.0-dev",
   "publisher": "Vitalyn",
   "author": {
     "name": "Vitalyn",
@@ -121,6 +121,23 @@
             "description": "Pin Headroom to a specific version (e.g. 0.31.0). Empty = always install/update to latest. Use the 'easy-headroom: Select Headroom Version' command to pick from detected releases."
           }
         }
+      },
+      {
+        "title": "easy-headroom › TokenSave",
+        "properties": {
+          "easy-headroom.tokensave.enabled": {
+            "type": "boolean",
+            "default": true,
+            "scope": "machine-overridable",
+            "description": "Install and enable TokenSave (semantic code-graph MCP server for Claude Code — replaces raw file reads/greps with targeted graph queries)"
+          },
+          "easy-headroom.tokensave.pinnedVersion": {
+            "type": "string",
+            "default": "",
+            "scope": "machine-overridable",
+            "description": "Pin TokenSave to a specific version (e.g. v7.0.2). Empty = always install/update to latest. Use the 'easy-headroom: Select TokenSave Version' command to pick from detected releases."
+          }
+        }
       }
     ],
     "commands": [
@@ -147,6 +164,10 @@
       {
         "command": "easy-headroom.selectHeadroomVersion",
         "title": "easy-headroom: Select Headroom Version"
+      },
+      {
+        "command": "easy-headroom.selectTokensaveVersion",
+        "title": "easy-headroom: Select TokenSave Version"
       },
       {
         "command": "easy-headroom.uninstallCleanup",

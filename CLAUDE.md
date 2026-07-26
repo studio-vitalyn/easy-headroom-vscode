@@ -1,8 +1,8 @@
 # easy-headroom
 
-VS Code extension that installs, configures, and manages **RTK** and
-**Headroom** automatically, to reduce token consumption for CLI coding
-agents.
+VS Code extension that installs, configures, and manages **RTK**,
+**Headroom**, and **TokenSave** automatically, to reduce token
+consumption for CLI coding agents.
 
 ## Multi-agent scope (V1)
 
@@ -57,6 +57,13 @@ extension must not pretend otherwise:
   generalize here without Headroom itself gaining multi-provider
   support (not confirmed, out of scope for V1). `headroom wrap claude`
   and all of `claudeSettings.ts` remain intentionally Claude-only.
+- **TokenSave** (semantic code-graph MCP server) is **Claude-Code-only
+  for V1** too — `tokensave install`/`uninstall --agent <id>` support
+  many other agents upstream, but this extension only ever passes
+  `--agent claude`, matching the single agent this rollout is actually
+  being measured against. Not symmetrical with RTK's multi-agent
+  `rtk.agents` setting — there's no `tokensave.agents` list — since
+  broadening this is a deliberate future step, not an oversight.
 
 A separate, optional project — **`docker-easy-headroom`** — provides a
 Docker bundle to run Headroom on a centralized instance shared across
@@ -144,6 +151,17 @@ shared across multiple machines, and is designed separately.
    local or remote proxy, depending on mode).
 8. **RTK dashboard tab**, alongside Headroom's own dashboard, inside
    the same webview panel — see "RTK dashboard tab" below.
+9. **TokenSave install + indexing** — a third, independent optimization
+   layer (semantic code-graph MCP server for Claude Code), installed
+   and registered automatically, with every open workspace folder
+   indexed (`tokensave init`/`sync`) so its own savings can be measured
+   — see "TokenSave install" below. No dashboard tab yet: rolled out
+   first to gather real usage data before deciding whether one is
+   worth building.
+10. **Settings tab**, alongside the others in the same webview panel —
+    a simplified, per-setting scope picker on top of the same real
+    `contributes.configuration` values, supplementing (not replacing)
+    native VS Code Settings — see "Settings tab" below.
 
 ### Configuration (`contributes.configuration`)
 
@@ -217,6 +235,18 @@ infra URLs/API keys leaking into a repo through workspace settings.
     "default": "",
     "scope": "machine-overridable",
     "description": "Pin Headroom to a specific version (e.g. 0.31.0). Empty = always install/update to latest. Use the 'easy-headroom: Select Headroom Version' command to pick from detected releases."
+  },
+  "easy-headroom.tokensave.enabled": {
+    "type": "boolean",
+    "default": true,
+    "scope": "machine-overridable",
+    "description": "Install and enable TokenSave (semantic code-graph MCP server for Claude Code — replaces raw file reads/greps with targeted graph queries)"
+  },
+  "easy-headroom.tokensave.pinnedVersion": {
+    "type": "string",
+    "default": "",
+    "scope": "machine-overridable",
+    "description": "Pin TokenSave to a specific version (e.g. v7.0.2). Empty = always install/update to latest. Use the 'easy-headroom: Select TokenSave Version' command to pick from detected releases."
   }
 }
 ```
@@ -371,6 +401,74 @@ working Python 3.10+ on the target host.
   populate a `showQuickPick` (latest first), and writes the choice to
   `headroom.pinnedVersion`.
 
+### TokenSave install — static binary, version-embedded filenames
+
+Confirmed against Headroom's own `tokensave_installer.py` reference
+(`aovestdipaperino/tokensave` release assets): TokenSave, like RTK,
+ships genuine per-platform static binaries (Rust), no runtime
+dependency — but unlike RTK, the asset **filenames embed the version**
+(`tokensave-<version>-<arch>-<os>.<ext>`), so there's no stable
+`releases/latest/download/<asset>` redirect to hit blind the way RTK's
+install does.
+
+- Asset selection by `process.platform`/`process.arch`:
+  - macOS arm64 → `tokensave-<version>-aarch64-macos.tar.gz`
+  - macOS x64 → **no prebuilt asset published** — `ensureTokensaveInstalled`
+    throws, surfaced as a warning by the caller; RTK/Headroom are
+    unaffected (same "one layer failing doesn't block the others"
+    principle as everywhere else in this file).
+  - Linux x64 → `tokensave-<version>-x86_64-linux.tar.gz`
+  - Linux arm64 → `tokensave-<version>-aarch64-linux.tar.gz`
+  - Windows x64 → `tokensave-<version>-x86_64-windows.zip`
+  - Windows arm64 → `tokensave-<version>-aarch64-windows.zip`
+- **Versioning**: unlike RTK/Headroom, resolving "latest" needs one
+  `GET /repos/aovestdipaperino/tokensave/releases/latest` call to get
+  the actual tag before a download URL can even be constructed. Unlike
+  the initial rollout, this is no longer a one-time-per-host cost:
+  `ensureTokensaveInstalled` now mirrors `ensureHeadroomInstalled`'s
+  own periodic-check pattern — a version marker file
+  (`tokensaveVersionFile`, `{installedVersion, lastCheckedAt}`) is
+  written after every install, and in unpinned mode the latest release
+  is re-checked at most once per `CHECK_INTERVAL_MS` (24h) on
+  activation, upgrading the binary in place if a newer tag exists.
+  This was changed because TokenSave ships frequent releases and the
+  binary itself nags on every MCP call once it's out of date
+  (`tokensave vX.Y.Z is installed, but vA.B.C is available`) — a
+  presence-only check meant that warning could persist indefinitely.
+  If `tokensave.pinnedVersion` is set, that tag is installed directly
+  (re-installing only if the marker disagrees with it) and no
+  "latest" API call happens at all. The `easy-headroom: Select
+  TokenSave Version` command still hits the paginated Releases API
+  only when invoked, same pattern as RTK/Headroom's own picker
+  commands.
+- Extract to `context.globalStorageUri` (`tokensave-bin/`), `chmod 755`
+  after extraction — identical to RTK's install target/permissions.
+  Shared low-level helpers (`pathExists`/`download`/
+  `extractZipWindows`/`findBinaryRecursive`) live in `archive.ts`,
+  factored out of `rtk.ts` since this is their second, byte-identical
+  consumer.
+- **`tokensaveBinDir` is prepended to `PATH`** in `applyEnvironment`
+  (`daemon.ts`), same as `rtkBinDir`/the Headroom venv's `bin` dir —
+  otherwise the binary is only reachable via its absolute path (as
+  used internally for MCP registration/indexing), not by typing
+  `tokensave` in one of this window's own integrated terminals. Like
+  the rest of that PATH prepending, this only covers integrated
+  terminals — Claude Code's own CLI process is spawned directly and
+  never sees `environmentVariableCollection` (see the comment on
+  `applyEnvironment` and `claudeSettings.ts`'s note on the same
+  limitation for `ANTHROPIC_BASE_URL`), which is fine here since MCP
+  registration already uses the absolute path.
+- **Supply-chain integrity — deliberately not pinned by digest here**,
+  unlike Headroom's own installer (which SHA-256-verifies every asset
+  before executing it, since it runs as a fallback inside `headroom
+  wrap` with no user-facing version picker). This extension's RTK
+  install has never done digest verification either, and TokenSave
+  follows that same existing precedent for consistency rather than
+  introducing a new, asymmetric security posture for one of three
+  binary installs. Revisit if RTK ever gains digest pinning.
+- No MCP-level idempotency check needed on our side — see "MCP server
+  registration" below.
+
 ### Wrap/init idempotency
 
 Before calling `rtk init --global --auto-patch[...]` for a given agent, check
@@ -396,6 +494,15 @@ rather than overwriting. So `--force` is never passed here — re-running
 this on every activation is as cheap and safe as re-running `rtk init`, and
 means a genuine drift stays exactly as the user last configured it instead
 of getting silently clobbered.
+
+`ensureTokensaveMcpInstalled` (`tokensave.ts`) runs `tokensave install
+--agent claude` right after the binary is confirmed present, same
+"call it every activation, no gate" treatment — **not independently
+confirmed** the way Headroom's diff-and-warn behavior was (that one was
+verified against a real install; TokenSave's was not), but this is
+still the reasonable default: worst case a redundant, harmless rewrite
+of its own MCP registration entry, not a destructive action. Revisit if
+a real run ever shows otherwise.
 
 ### `headroom proxy` daemon lifecycle (local mode)
 
@@ -713,6 +820,101 @@ numbers in two places.
   `carbonFootprint.ts`) stay as `co2`/`CO2` — only rendered text
   changes.
 
+### Settings tab
+
+A fourth dashboard tab (`#view-settings` / `settingsMeta.ts`),
+supplementing rather than replacing native VS Code Settings
+(`@ext:vitalyn.easy-headroom` filter, `easy-headroom.openSettings` —
+still there for anyone who prefers it). Exists because navigating
+User/Remote/Workspace/Folder scopes for 9 settings via the native UI
+is more friction than this extension's needs warrant.
+
+- **Always reachable, unlike the other three tabs**: `tabOrder`
+  unconditionally pushes `'settings'` last, and `openDashboard()` no
+  longer early-returns when both Headroom and RTK are disabled — it's
+  the only way to turn either back on from inside the dashboard once
+  nothing else is showing. When it's the sole available tab,
+  `showTabs` is false and it renders directly (same convention as any
+  single-tab case elsewhere in this file).
+- **`contributes.configuration` in `package.json` is the single source
+  of truth** for type/default/description/scope —
+  `buildSettingsSnapshot()` reads it via
+  `context.extension.packageJSON` (same pattern the status bar uses
+  for the extension version) rather than duplicating that metadata, so
+  this tab can't drift from what the native Settings UI shows for the
+  same key.
+- **Real config writes, not a separate store**: `writeSetting()` calls
+  `vscode.workspace.getConfiguration('easy-headroom', resource).update(...)`
+  against the real `ConfigurationTarget` (Global/Workspace/WorkspaceFolder
+  — there's no separate "Remote" target at the API level; VS Code
+  itself routes a Global write to local or Remote User `settings.json`
+  depending on context). Writing at WorkspaceFolder level requires the
+  `WorkspaceConfiguration` handle itself to be resource-scoped (a
+  folder `Uri`), which only makes sense in a single-root workspace —
+  multi-root and no-workspace cases exclude `WorkspaceFolder` entirely
+  (`allowedTargets()`). The existing `onDidChangeConfiguration`
+  listener in `extension.ts` (`daemon.applyEnvironment()`) picks up
+  these writes automatically, no new listener needed for that.
+- **Per-setting allowed vs. recommended target, not just one picker**:
+  `allowedTargets()` derives the mechanically-valid scope list from
+  each setting's declared `scope` (`machine`/`application` → User
+  only; `machine-overridable`/`window` → User+Workspace; everything
+  else → all three), further filtered by whether a workspace is open
+  and single- vs. multi-root. `RECOMMENDED_TARGET` is a separate,
+  hand-picked *default selection* within that allowed set, for settings
+  where the most-permissive level isn't the sensible default value —
+  falls back to `allowed[0]` if the hand-picked value isn't actually in
+  the allowed set for the current workspace context.
+  `RESTRICT_ALLOWED` goes further and removes an option from `allowed`
+  entirely, for cases where the declared `scope` is simply more
+  permissive than makes sense: `projectName` is `resource` scoped (so
+  User is technically legal) but is a per-project fact, never a global
+  preference, so User is excluded outright rather than merely
+  deprioritized — the scope `<select>` for that field never offers it.
+  Falls back to the unrestricted list if the restriction would leave
+  zero options (no workspace open at all — nothing to restrict to).
+- **"User" relabels to "User (Remote)" in a Remote-SSH/WSL/container
+  window** (`vscode.env.remoteName`, pushed alongside each
+  `settings:data` message) — there's no separate write target for
+  "Remote" at the API level (see above), so this is a client-side
+  label change only, matching how native Settings names that same tab
+  in a remote context.
+- **`machine-overridable` + WorkspaceFolder is an unverified
+  assumption**: `allowedTargets()` currently excludes `WorkspaceFolder`
+  for that scope (only Global/Workspace), following the scope's name
+  literally, but this hasn't been confirmed against a real multi-root
+  workspace — check before relying on it.
+- **Conditional visibility is hardcoded, not a rules engine** — same
+  philosophy as the CO2/RTK special-casing elsewhere in this file:
+  `updateVisibility()` in the inline webview script has exactly 5
+  direct conditionals (hide `headroom.mode`/`remoteUrl`/`proxyToken`/
+  `localPort`/`pinnedVersion` unless `headroom.enabled`; further gate
+  `remoteUrl`/`proxyToken` on `mode === 'remote'` and `localPort` on
+  `mode === 'local'`; hide `rtk.agents`/`rtk.pinnedVersion` unless
+  `rtk.enabled`; hide `tokensave.pinnedVersion` unless
+  `tokensave.enabled`) and re-runs on every relevant field's `change`
+  event via an optimistic local update to `item.value.effective`
+  before the round trip to the extension host completes.
+- **Data flows by push, same as the RTK tab** — no settings snapshot
+  is embedded in the initial HTML; the webview posts
+  `{type:'settings:init'}` on load and the host replies with
+  `{type:'settings:data', groups}` from `buildSettingsSnapshot()`.
+  Every write (`settings:set`) and pinned-version pick
+  (`settings:pickVersion`, delegating to the existing
+  `selectRtkVersion`/`selectHeadroomVersion`/`selectTokensaveVersion`
+  QuickPick flows rather than reimplementing them) triggers a fresh
+  snapshot push back to the webview. A panel-scoped
+  `onDidChangeConfiguration` listener (disposed alongside the panel)
+  also re-pushes the snapshot whenever `easy-headroom` config changes
+  externally (native Settings UI, another window, a hand-edited
+  `settings.json`), so this tab can't show stale values.
+- **`pinnedVersion` fields keep the existing QuickPick UX**: rather
+  than a raw text input, each renders a "Pick from releases…" button
+  (`data-pick-version`) that calls the same version-selection commands
+  used elsewhere (`easy-headroom.selectRtkVersion` and friends), which
+  already fetch releases from GitHub and show the
+  reload-window reminder.
+
 ### Setup guidance — no popups, ever
 
 Deliberate choice: never prompt with a prime-time popup or modal
@@ -760,9 +962,9 @@ case — it drives several requirements above:
     proxy` daemon (local mode). Mostly a manual escape hatch; normal
     lifecycle is handled by the heartbeat reaper, not by the user.
   - `easy-headroom.selectRtkVersion` / `easy-headroom.selectHeadroomVersion`
-    — QuickPick of detected versions (see "Versioning" under each
-    install section), writes the choice to the matching
-    `pinnedVersion` setting, then reinstalls.
+    / `easy-headroom.selectTokensaveVersion` — QuickPick of detected
+    versions (see "Versioning" under each install section), writes the
+    choice to the matching `pinnedVersion` setting, then reinstalls.
   - `easy-headroom.uninstallCleanup` — see "Uninstall / cleanup" below.
 
 ### Uninstall / cleanup
@@ -779,9 +981,12 @@ that point) — so cleanup can't be automatic when the user clicks
   clean up everything — remove the RTK integration for every agent in
   `rtk.agents` (Codex's AGENTS.md block is left in place, see
   "Multi-agent scope"), remove the Headroom wrap from
-  `~/.claude/settings.json`, delete the downloaded RTK binary and the
-  Headroom venv from `globalStorageUri`, stop the shared proxy daemon
-  if running.
+  `~/.claude/settings.json`, best-effort `tokensave uninstall --agent
+  claude` (failure here doesn't block the rest of cleanup — the binary
+  is deleted regardless, a stale MCP entry is left for manual removal),
+  delete the downloaded RTK binary, the Headroom venv, and the
+  TokenSave binary from `globalStorageUri`, stop the shared proxy
+  daemon if running.
 
 ### Security / practices to follow
 
@@ -891,12 +1096,20 @@ project, not the host, so it belongs in a committed
 `.vscode/settings.json`. Still open: `openDashboard` doesn't route
 through `/p/<slug>` yet — see the TODO under "Status bar".
 
+Resolved: TokenSave is rolled out enabled-by-default
+(`tokensave.enabled=true`), Claude-Code-only, with no dashboard tab yet
+— the decision (2026-07-24) was to ship the install/index/MCP-registration
+plumbing first and gather real usage data across several projects over
+a few days before deciding whether a dashboard is worth building at
+all, rather than building one speculatively. See "TokenSave install"
+above for the install/versioning details.
+
 ## Guiding principle for Claude Code
 
-Always keep RTK and Headroom as two strictly independent layers in the
-codebase (no function should assume one implies the other) — this is
-the principle that emerged from all the debugging that led to this
-project, and it must remain true in the implementation. The same
-independence applies across RTK's agents: no function should assume
-that because one agent is configured/working, another is too (see
-"Multi-agent scope (V1)").
+Always keep RTK, Headroom, and TokenSave as three strictly independent
+layers in the codebase (no function should assume one implies another)
+— this is the principle that emerged from all the debugging that led
+to this project, and it must remain true in the implementation. The
+same independence applies across RTK's agents: no function should
+assume that because one agent is configured/working, another is too
+(see "Multi-agent scope (V1)").

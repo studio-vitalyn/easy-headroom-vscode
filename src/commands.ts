@@ -7,11 +7,14 @@ import * as vscode from 'vscode';
 import { config } from './config';
 import { storagePaths } from './paths';
 import { ProxyDaemonManager, checkHealth } from './daemon';
-import { listRtkReleases, listHeadroomReleases } from './versions';
+import { listRtkReleases, listHeadroomReleases, listTokensaveReleases } from './versions';
 import { removeHeadroomWrap, clearProjectEnv } from './claudeSettings';
 import { removeRtkIntegration } from './rtkAgents';
+import { pathExists } from './archive';
+import { runCapture } from './tokensave';
 import { getRtkStats, getRtkProjects } from './rtkStats';
 import { computeCarbonEstimate, type CarbonEstimate } from './carbonFootprint';
+import { buildSettingsSnapshot, writeSetting, type TargetName } from './settingsMeta';
 
 let dashboardPanel: vscode.WebviewPanel | undefined;
 
@@ -186,10 +189,13 @@ function renderDashboardHtml(opts: {
   // Only show a tab switcher when more than one view is actually available — otherwise there's
   // nothing to switch between, so skip straight to whichever single view applies. CO2 rides in
   // third position, after both raw-data tabs.
-  const tabOrder: Array<'headroom' | 'rtk' | 'co2'> = [];
+  const tabOrder: Array<'headroom' | 'rtk' | 'co2' | 'settings'> = [];
   if (headroomAvailable) tabOrder.push('headroom');
   if (rtkAvailable) tabOrder.push('rtk');
   if (co2Available) tabOrder.push('co2');
+  // Always present, even with everything else disabled — it's the only way to turn RTK/Headroom
+  // back on from inside the dashboard once nothing else is showing.
+  tabOrder.push('settings');
   const showTabs = tabOrder.length > 1;
   const defaultTab = tabOrder[0];
   const csp = [
@@ -209,8 +215,8 @@ function renderDashboardHtml(opts: {
 <style>
   html, body { height: 100%; margin: 0; padding: 0; font-family: var(--vscode-font-family); color: var(--vscode-foreground); display: flex; flex-direction: column; }
   #tabbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--vscode-widget-border); flex: 0 0 auto; }
-  .brand-block { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 2px 10px 2px 2px; margin-right: 4px; border-right: 1px solid var(--vscode-widget-border); }
-  .brand-logo { width: 20px; height: 20px; display: block; }
+  .brand-block { display: flex; align-items: center; padding-right: 10px; margin-right: 4px; border-right: 1px solid var(--vscode-widget-border); }
+  .brand-logo { width: 28px; height: 28px; display: block; }
   .tab-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 4px 12px; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--vscode-foreground); cursor: pointer; font-family: inherit; }
   .tab-btn.active { background: var(--vscode-list-activeSelectionBackground); border-color: var(--vscode-focusBorder); }
   .tab-btn .tab-title { font-weight: 600; font-size: 12px; }
@@ -281,6 +287,32 @@ function renderDashboardHtml(opts: {
   .co2-cell-fill { height: 100%; border-radius: 3px; }
   .conf-estimated { opacity: 0.65; font-style: italic; }
   .co2-calc-disclaimer { margin: 8px 14px 20px; font-size: 11px; font-style: italic; opacity: 0.7; max-width: 640px; }
+  #settings-content { padding: 6px 14px 24px; max-width: 720px; }
+  .settings-group-title { margin: 18px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.8; }
+  .settings-group-title:first-child { margin-top: 6px; }
+  .setting-row { padding: 10px 0; border-bottom: 1px solid var(--vscode-widget-border); }
+  .setting-row.hidden { display: none; }
+  .setting-label-row { display: flex; align-items: center; gap: 8px; }
+  .setting-label { font-size: 13px; font-weight: 600; }
+  .setting-badge { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); opacity: 0.85; }
+  .setting-desc { font-size: 11px; opacity: 0.7; margin: 3px 0 8px; max-width: 560px; }
+  .setting-control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .setting-control input[type="text"], .setting-control input[type="number"] {
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border); border-radius: 4px; padding: 3px 6px; min-width: 220px;
+  }
+  .setting-control input[type="checkbox"] { cursor: pointer; }
+  .setting-agents { display: flex; gap: 12px; }
+  .setting-agents label { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+  .setting-scope-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .setting-scope-label { font-size: 11px; opacity: 0.75; }
+  .scope-select { font-size: 11px; padding: 1px 4px; }
+  .tab-btn-icon { flex-direction: row; align-items: center; justify-content: center; margin-left: auto; padding: 2px 6px; }
+  .tab-btn-icon .tab-icon { font-size: 22px; line-height: 1; }
+  .pick-version-btn {
+    font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--vscode-button-border, transparent);
+    background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer;
+  }
 </style>
 </head>
 <body>
@@ -300,7 +332,10 @@ ${rtkAvailable ? `  <button class="tab-btn${defaultTab === 'rtk' ? ' active' : '
 ${co2Available ? `  <button class="tab-btn${defaultTab === 'co2' ? ' active' : ''}" id="tab-co2" data-tab="co2">
     <span class="tab-title">CO₂</span>
     <span class="tab-metric" id="tab-co2-metric">…</span>
-  </button>` : ''}`
+  </button>` : ''}
+  <button class="tab-btn tab-btn-icon${defaultTab === 'settings' ? ' active' : ''}" id="tab-settings" data-tab="settings" title="Settings" aria-label="Settings">
+    <span class="tab-icon" aria-hidden="true">⚙</span>
+  </button>`
     : ''
 }
 </div>
@@ -357,12 +392,15 @@ ${
   </div>`
     : ''
 }
+  <div class="view${showTabs && defaultTab !== 'settings' ? ' hidden' : ''}" id="view-settings">
+    <div id="settings-content"></div>
+  </div>
 </div>
 <script nonce="${nonce}">
 (function() {
   const vscode = acquireVsCodeApi();
   const tabs = Array.from(document.querySelectorAll('.tab-btn'));
-  const views = { headroom: document.getElementById('view-headroom'), rtk: document.getElementById('view-rtk'), co2: document.getElementById('view-co2') };
+  const views = { headroom: document.getElementById('view-headroom'), rtk: document.getElementById('view-rtk'), co2: document.getElementById('view-co2'), settings: document.getElementById('view-settings') };
   tabs.forEach((btn) => btn.addEventListener('click', () => {
     const tab = btn.dataset.tab;
     tabs.forEach((b) => b.classList.toggle('active', b === btn));
@@ -375,6 +413,9 @@ ${
   // combine them — see renderCo2().
   let latestCarbon = null;
   let latestRtkSaved;
+  // Set from each settings:data push — lets the scope picker label "User" as "User (Remote)"
+  // when running in a Remote-SSH/WSL/container window, matching what native Settings calls it.
+  let remoteName;
   if (projectSelect) {
     projectSelect.addEventListener('change', () => {
       vscode.postMessage({ type: 'rtk:selectProject', project: projectSelect.value || null });
@@ -578,8 +619,161 @@ ${
     ).join('');
   }
 
+  // Group/label/type/description/scope all come from package.json's contributes.configuration
+  // (see settingsMeta.ts) — this only builds the DOM and wires up writes, it doesn't hardcode
+  // any of that metadata itself.
+  function renderSettings(groups) {
+    const el = document.getElementById('settings-content');
+    if (!el) return;
+    // "User" is the same VS Code ConfigurationTarget.Global write regardless of Remote-SSH/WSL/
+    // container — VS Code itself decides at write time whether that lands in the local or the
+    // remote settings.json. Relabeling it here (rather than adding a distinct "Remote" scope
+    // option) mirrors that: there's nothing extra to pick, just a clearer name for where it goes.
+    const scopeLabels = { Global: remoteName ? 'User (Remote)' : 'User', Workspace: 'Workspace', WorkspaceFolder: 'Folder' };
+    const byKey = {};
+    groups.forEach((g) => g.items.forEach((it) => { byKey[it.key] = it; }));
+
+    function renderScopeControl(item) {
+      const currentTarget = item.current || item.recommended;
+      if (item.allowed.length > 1) {
+        return '<select class="scope-select" data-scope-for="' + item.key + '">' + item.allowed.map((t) =>
+          '<option value="' + t + '"' + (t === currentTarget ? ' selected' : '') + '>' + scopeLabels[t] + '</option>'
+        ).join('') + '</select>';
+      }
+      return '<span class="setting-badge">' + scopeLabels[item.allowed[0]] + '</span>';
+    }
+
+    function renderValueControl(item) {
+      let input;
+      if (item.type === 'boolean') {
+        input = '<input type="checkbox" data-key="' + item.key + '"' + (item.value.effective ? ' checked' : '') + '>';
+      } else if (item.key === 'rtk.agents' && item.items && item.items.enum) {
+        input = '<div class="setting-agents">' + item.items.enum.map((a) => {
+          const checked = Array.isArray(item.value.effective) && item.value.effective.indexOf(a) !== -1;
+          return '<label><input type="checkbox" data-key="' + item.key + '" data-agent-value="' + esc(a) + '"' + (checked ? ' checked' : '') + '>' + esc(a) + '</label>';
+        }).join('') + '</div>';
+      } else if (item.enum) {
+        input = '<select data-key="' + item.key + '">' + item.enum.map((v) =>
+          '<option value="' + esc(v) + '"' + (v === item.value.effective ? ' selected' : '') + '>' + esc(v) + '</option>'
+        ).join('') + '</select>';
+      } else if (item.type === 'number') {
+        input = '<input type="number" data-key="' + item.key + '" value="' + esc(item.value.effective == null ? '' : item.value.effective) + '">';
+      } else {
+        input = '<input type="text" data-key="' + item.key + '" value="' + esc(item.value.effective == null ? '' : item.value.effective) + '">';
+      }
+
+      const pickBtn = /pinnedVersion$/.test(item.key)
+        ? '<button type="button" class="pick-version-btn" data-pick-version="' + item.key.split('.')[0] + '">Pick from releases…</button>'
+        : '';
+
+      return input + pickBtn;
+    }
+
+    el.innerHTML = groups.map((group) =>
+      '<div class="settings-group-title">' + esc(group.title) + '</div>'
+      + group.items.map((item) =>
+          '<div class="setting-row" data-row-for="' + item.key + '">'
+          + '<div class="setting-label-row"><span class="setting-label">' + esc(item.label) + '</span></div>'
+          + '<div class="setting-desc">' + esc(item.description) + '</div>'
+          + '<div class="setting-control">' + renderValueControl(item) + '</div>'
+          // headroom.localPort has no scope picker of its own — it always follows headroom.mode's
+          // (see send()/the data-scope-for listener below), since a port with no mode to go with it
+          // makes no sense to store at a different scope.
+          + (item.allowed.length > 1 && item.key !== 'headroom.localPort'
+              ? '<div class="setting-scope-row"><span class="setting-scope-label">Save to</span>' + renderScopeControl(item) + '</div>'
+              : '')
+          + '</div>'
+        ).join('')
+    ).join('');
+
+    function currentValue(key) {
+      return byKey[key] ? byKey[key].value.effective : undefined;
+    }
+
+    // Hardcoded, not a generic rules engine — this dashboard has exactly 5 conditional-visibility
+    // rules and they're small enough that a table would just add indirection.
+    function updateVisibility() {
+      const headroomEnabled = !!currentValue('headroom.enabled');
+      const headroomMode = currentValue('headroom.mode');
+      const rtkEnabled = !!currentValue('rtk.enabled');
+      const tokensaveEnabled = !!currentValue('tokensave.enabled');
+      const setRowVisible = (key, visible) => {
+        const row = el.querySelector('[data-row-for="' + key + '"]');
+        if (row) row.classList.toggle('hidden', !visible);
+      };
+      setRowVisible('rtk.agents', rtkEnabled);
+      setRowVisible('rtk.pinnedVersion', rtkEnabled);
+      setRowVisible('headroom.mode', headroomEnabled);
+      setRowVisible('headroom.remoteUrl', headroomEnabled && headroomMode === 'remote');
+      setRowVisible('headroom.proxyToken', headroomEnabled && headroomMode === 'remote');
+      setRowVisible('headroom.localPort', headroomEnabled && headroomMode === 'local');
+      setRowVisible('headroom.pinnedVersion', headroomEnabled);
+      setRowVisible('tokensave.pinnedVersion', tokensaveEnabled);
+    }
+
+    function send(key) {
+      const item = byKey[key];
+      const row = el.querySelector('[data-row-for="' + key + '"]');
+      if (!item || !row) return;
+      // headroom.localPort has no scope-select of its own — it always writes at whatever
+      // scope headroom.mode is currently set to (see the data-scope-for listener below,
+      // which re-sends localPort whenever mode's own scope changes).
+      let target;
+      if (key === 'headroom.localPort') {
+        const modeRow = el.querySelector('[data-row-for="headroom.mode"]');
+        const modeScopeSelect = modeRow && modeRow.querySelector('.scope-select');
+        target = modeScopeSelect ? modeScopeSelect.value : (byKey['headroom.mode'] ? byKey['headroom.mode'].recommended : item.recommended);
+      } else {
+        const scopeSelect = row.querySelector('.scope-select');
+        target = scopeSelect ? scopeSelect.value : item.recommended;
+      }
+      let value;
+      if (item.type === 'boolean') {
+        value = row.querySelector('input[type="checkbox"]').checked;
+      } else if (key === 'rtk.agents') {
+        value = Array.from(row.querySelectorAll('input[data-agent-value]'))
+          .filter((cb) => cb.checked)
+          .map((cb) => cb.dataset.agentValue);
+      } else if (item.enum) {
+        value = row.querySelector('select[data-key]').value;
+      } else if (item.type === 'number') {
+        value = Number(row.querySelector('input[type="number"]').value);
+      } else {
+        value = row.querySelector('input[type="text"]').value;
+      }
+      // Optimistic local update so dependent rows (e.g. headroom.mode -> remoteUrl) react
+      // immediately instead of waiting on the round trip through the extension host.
+      item.value.effective = value;
+      updateVisibility();
+      vscode.postMessage({ type: 'settings:set', key: key, value: value, target: target });
+    }
+
+    el.querySelectorAll('[data-key]').forEach((elm) => {
+      elm.addEventListener('change', () => send(elm.dataset.key));
+    });
+    // Changing the scope alone (without touching the value) must still persist — otherwise the
+    // dropdown silently reverts to the actual storage scope on the next snapshot push.
+    el.querySelectorAll('[data-scope-for]').forEach((elm) => {
+      elm.addEventListener('change', () => {
+        send(elm.dataset.scopeFor);
+        // localPort is linked to mode's scope (see send()) — move it along whenever mode's own scope changes.
+        if (elm.dataset.scopeFor === 'headroom.mode') send('headroom.localPort');
+      });
+    });
+    el.querySelectorAll('[data-pick-version]').forEach((btn) => {
+      btn.addEventListener('click', () => vscode.postMessage({ type: 'settings:pickVersion', field: btn.dataset.pickVersion }));
+    });
+
+    updateVisibility();
+  }
+
   window.addEventListener('message', (event) => {
     const msg = event.data;
+    if (msg.type === 'settings:data') {
+      remoteName = msg.remoteName;
+      renderSettings(msg.groups);
+      return;
+    }
     if (msg.type === 'headroom:stats') {
       renderHeadroomStats(msg.stats);
       latestCarbon = (msg.stats && msg.stats.carbon) || null;
@@ -625,6 +819,7 @@ ${
   if (document.getElementById('view-rtk')) {
     vscode.postMessage({ type: 'rtk:init' });
   }
+  vscode.postMessage({ type: 'settings:init' });
 })();
 </script>
 </body>
@@ -634,11 +829,8 @@ ${
 async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
   const headroomAvailable = config.headroomEnabled();
   const rtkAvailable = rtkDashboardAvailable();
-
-  if (!headroomAvailable && !rtkAvailable) {
-    void vscode.window.showInformationMessage('easy-headroom: nothing to show — enable RTK and/or Headroom first.');
-    return;
-  }
+  // Unlike the Headroom/RTK/CO2 tabs, Settings is always reachable — it's the only way to turn
+  // RTK/Headroom back on from inside the dashboard once nothing else is showing.
 
   let targetBase = '';
   if (headroomAvailable) {
@@ -668,9 +860,23 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
     }
   );
   const panel = dashboardPanel;
+  panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'assets', 'icon.png');
+  const postSettingsSnapshot = () => {
+    void panel.webview.postMessage({
+      type: 'settings:data',
+      groups: buildSettingsSnapshot(context),
+      remoteName: vscode.env.remoteName,
+    });
+  };
+  // Keeps the Settings tab in sync if the same config is edited elsewhere (native Settings UI,
+  // another window, a workspace settings.json edit) while this panel is open.
+  const settingsConfigListener = vscode.workspace.onDidChangeConfiguration((e) => {
+    if (e.affectsConfiguration('easy-headroom')) postSettingsSnapshot();
+  });
   panel.onDidDispose(() => {
     dashboardPanel = undefined;
     onHeadroomStats = undefined;
+    settingsConfigListener.dispose();
   });
 
   let externalOrigin = '';
@@ -692,12 +898,50 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
   // Headroom iframe has) — the extension host resolves it (local DB read or remote aggregator
   // fetch, see rtkStats.ts) and pushes the result in, the same trust boundary as every other
   // filesystem/network access this extension does.
-  panel.webview.onDidReceiveMessage(async (msg: { type?: string; project?: string | null }) => {
-    if (msg?.type !== 'rtk:init' && msg?.type !== 'rtk:selectProject') return;
-    const project = msg.type === 'rtk:selectProject' && msg.project ? msg.project : undefined;
-    const [stats, projects] = await Promise.all([getRtkStats(project), getRtkProjects()]);
-    void panel.webview.postMessage({ type: 'rtk:data', stats: stats ?? null, projects, selected: project ?? null });
-  });
+  panel.webview.onDidReceiveMessage(
+    async (msg: {
+      type?: string;
+      project?: string | null;
+      key?: string;
+      value?: unknown;
+      target?: TargetName;
+      field?: string;
+    }) => {
+      if (msg?.type === 'rtk:init' || msg?.type === 'rtk:selectProject') {
+        const project = msg.type === 'rtk:selectProject' && msg.project ? msg.project : undefined;
+        const [stats, projects] = await Promise.all([getRtkStats(project), getRtkProjects()]);
+        void panel.webview.postMessage({ type: 'rtk:data', stats: stats ?? null, projects, selected: project ?? null });
+        return;
+      }
+      if (msg?.type === 'settings:init') {
+        postSettingsSnapshot();
+        return;
+      }
+      if (msg?.type === 'settings:set' && msg.key && msg.target) {
+        try {
+          await writeSetting(msg.key, msg.value, msg.target);
+        } catch (err) {
+          void vscode.window.showErrorMessage(
+            `easy-headroom: failed to save ${msg.key} — ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+        // The onDidChangeConfiguration listener above also resends a fresh snapshot, but that
+        // fires async on VS Code's own timing — resend here too so the scope select and any
+        // dependent value the user just touched update without a visible delay.
+        postSettingsSnapshot();
+        return;
+      }
+      if (msg?.type === 'settings:pickVersion' && msg.field) {
+        const pickers: Record<string, () => Promise<void>> = {
+          rtk: selectRtkVersion,
+          headroom: selectHeadroomVersion,
+          tokensave: selectTokensaveVersion,
+        };
+        await pickers[msg.field]?.();
+        postSettingsSnapshot();
+      }
+    }
+  );
 
   const iconUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'assets', 'icon.png'));
   panel.webview.html = renderDashboardHtml({
@@ -761,11 +1005,28 @@ async function selectHeadroomVersion(): Promise<void> {
   );
 }
 
+async function selectTokensaveVersion(): Promise<void> {
+  const versions = await listTokensaveReleases();
+  if (versions.length === 0) {
+    void vscode.window.showErrorMessage('easy-headroom: could not fetch TokenSave releases.');
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(['(latest)', ...versions], {
+    placeHolder: 'Select a TokenSave version to pin (or latest)',
+  });
+  if (picked === undefined) return;
+  await config.setTokensavePinnedVersion(picked === '(latest)' ? '' : picked);
+  void vscode.window.showInformationMessage(
+    'easy-headroom: reload the window to reinstall TokenSave at the selected version.'
+  );
+}
+
 async function uninstallCleanup(context: vscode.ExtensionContext, daemon: ProxyDaemonManager): Promise<void> {
   const confirmed = await vscode.window.showWarningMessage(
-    'This removes the RTK integration for every configured agent and the Headroom wrap from ' +
-      '~/.claude/settings.json, deletes the downloaded RTK binary and Headroom venv, and stops the ' +
-      'shared proxy daemon if running. Continue?',
+    'This removes the RTK integration for every configured agent, the Headroom wrap from ' +
+      '~/.claude/settings.json, and the TokenSave MCP registration, deletes the downloaded RTK ' +
+      'binary, Headroom venv, and TokenSave binary, and stops the shared proxy daemon if running. ' +
+      'Continue?',
     { modal: true },
     'Clean Up'
   );
@@ -779,8 +1040,18 @@ async function uninstallCleanup(context: vscode.ExtensionContext, daemon: ProxyD
   await clearProjectEnv(['ANTHROPIC_BASE_URL', 'HEADROOM_OUTPUT_SHAPER']);
 
   const paths = storagePaths(context);
+  if (await pathExists(paths.tokensaveBinPath)) {
+    try {
+      await runCapture(paths.tokensaveBinPath, ['uninstall', '--agent', 'claude']);
+    } catch {
+      // Best-effort — the binary is about to be deleted regardless, and a failed unregister
+      // just leaves a stale MCP entry the user can remove by hand.
+    }
+  }
   await fs.rm(paths.rtkBinDir, { recursive: true, force: true });
   await fs.rm(paths.headroomVenvDir, { recursive: true, force: true });
+  await fs.rm(paths.tokensaveBinDir, { recursive: true, force: true });
+  await fs.rm(paths.tokensaveVersionFile, { force: true });
 
   void vscode.window.showInformationMessage('easy-headroom: cleanup complete.');
 }
@@ -804,6 +1075,7 @@ export function registerCommands(context: vscode.ExtensionContext, daemon: Proxy
     vscode.commands.registerCommand('easy-headroom.stopProxy', () => daemon.stop()),
     vscode.commands.registerCommand('easy-headroom.selectRtkVersion', selectRtkVersion),
     vscode.commands.registerCommand('easy-headroom.selectHeadroomVersion', selectHeadroomVersion),
+    vscode.commands.registerCommand('easy-headroom.selectTokensaveVersion', selectTokensaveVersion),
     vscode.commands.registerCommand('easy-headroom.uninstallCleanup', () => uninstallCleanup(context, daemon))
   );
 

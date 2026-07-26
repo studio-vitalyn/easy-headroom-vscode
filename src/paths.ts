@@ -73,5 +73,8 @@ export function storagePaths(context: vscode.ExtensionContext) {
     proxyLogFile: path.join(root, 'proxy.log'),
     proxyClientsDir: path.join(root, 'proxy-clients'),
     headroomVersionFile: path.join(root, 'headroom-version.json'),
+    tokensaveBinDir: path.join(root, 'tokensave-bin'),
+    tokensaveBinPath: path.join(root, 'tokensave-bin', process.platform === 'win32' ? 'tokensave.exe' : 'tokensave'),
+    tokensaveVersionFile: path.join(root, 'tokensave-version.json'),
   };
 }

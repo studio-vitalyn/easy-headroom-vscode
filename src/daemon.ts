@@ -84,6 +84,9 @@ export class ProxyDaemonManager {
     if (config.headroomEnabled() && config.headroomMode() === 'local') {
       collection.prepend('PATH', path.dirname(this.paths.headroomBinPath) + path.delimiter);
     }
+    if (config.tokensaveEnabled()) {
+      collection.prepend('PATH', this.paths.tokensaveBinDir + path.delimiter);
+    }
 
     const managedKeys = ['ANTHROPIC_BASE_URL', 'HEADROOM_OUTPUT_SHAPER', 'ANTHROPIC_CUSTOM_HEADERS'];
 
