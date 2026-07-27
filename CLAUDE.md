@@ -968,6 +968,21 @@ is more friction than this extension's needs warrant.
   for the extension version) rather than duplicating that metadata, so
   this tab can't drift from what the native Settings UI shows for the
   same key.
+- **Writing at a broader scope offers to clear shadowing narrower ones,
+  with confirmation**: VS Code's own precedence (User < Workspace <
+  WorkspaceFolder) means writing at, say, Global while a Workspace
+  override already exists (e.g. a team-shared `.vscode/settings.json`
+  or `.code-workspace`) is silently ineffective — the narrower value
+  keeps winning. `shadowingTargets()` (`settingsMeta.ts`) checks
+  `cfg.inspect()` for any narrower scope holding an explicit value
+  before a `settings:set` write; if any exist, the `openDashboard`
+  message handler shows a modal `showWarningMessage` (`Clear and
+  Save` / cancel) naming the shadowing scope(s) before calling
+  `clearSetting()` on each and then `writeSetting()`. Deliberately a
+  confirmation, not a silent auto-clear or a passive warning-only
+  indicator — in a team context that narrower value is often a
+  colleague's committed choice, not a leftover from this dashboard,
+  so an unprompted delete would be a real, hard-to-notice loss.
 - **Real config writes, not a separate store**: `writeSetting()` calls
   `vscode.workspace.getConfiguration('easy-headroom', resource).update(...)`
   against the real `ConfigurationTarget` (Global/Workspace/WorkspaceFolder

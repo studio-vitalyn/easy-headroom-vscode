@@ -21,7 +21,14 @@ import {
   type TokensaveRange,
 } from './tokensaveStats';
 import { computeCarbonEstimate, type CarbonEstimate } from './carbonFootprint';
-import { buildSettingsSnapshot, writeSetting, type TargetName } from './settingsMeta';
+import {
+  buildSettingsSnapshot,
+  writeSetting,
+  shadowingTargets,
+  clearSetting,
+  settingLabel,
+  type TargetName,
+} from './settingsMeta';
 
 let dashboardPanel: vscode.WebviewPanel | undefined;
 
@@ -1190,6 +1197,26 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
       }
       if (msg?.type === 'settings:set' && msg.key && msg.target) {
         try {
+          // Shared/team config: writing at a broader scope (e.g. User) while a narrower one
+          // (Workspace/WorkspaceFolder, often committed and shared with the team) still holds an
+          // override would otherwise be silently ineffective — VS Code's own precedence keeps
+          // picking the narrower value. Ask before clearing it, since it may be someone else's
+          // committed choice, not just a leftover from this dashboard.
+          const shadowing = shadowingTargets(msg.key, msg.target);
+          if (shadowing.length > 0) {
+            const scopes = shadowing.join(' and ');
+            const choice = await vscode.window.showWarningMessage(
+              `"${settingLabel(msg.key)}" is also set at ${scopes} level, which would still take ` +
+                `precedence over this change. Clear the ${scopes} value too?`,
+              { modal: true },
+              'Clear and Save'
+            );
+            if (choice !== 'Clear and Save') {
+              postSettingsSnapshot();
+              return;
+            }
+            for (const target of shadowing) await clearSetting(msg.key, target);
+          }
           await writeSetting(msg.key, msg.value, msg.target);
         } catch (err) {
           void vscode.window.showErrorMessage(

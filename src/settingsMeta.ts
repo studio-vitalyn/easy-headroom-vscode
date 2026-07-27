@@ -167,3 +167,32 @@ export async function writeSetting(key: string, value: unknown, target: TargetNa
   const cfg = vscode.workspace.getConfiguration('easy-headroom', resource);
   await cfg.update(key, value, TARGET_ENUM[target]);
 }
+
+export function settingLabel(key: string): string {
+  return LABELS[key] ?? key;
+}
+
+const TARGET_ORDER: TargetName[] = ['Global', 'Workspace', 'WorkspaceFolder'];
+
+/** Scopes narrower than `target` (Workspace/WorkspaceFolder win over Global, WorkspaceFolder wins
+ *  over Workspace) that currently hold an explicit override — writing at `target` would be
+ *  silently ineffective otherwise, since VS Code's own precedence still picks the narrower value.
+ *  Used to offer clearing those overrides alongside the write, rather than have the user discover
+ *  the value "didn't take" after the fact. */
+export function shadowingTargets(key: string, target: TargetName): TargetName[] {
+  const folders = vscode.workspace.workspaceFolders;
+  const resource = folders?.length === 1 ? folders[0].uri : undefined;
+  const inspected = vscode.workspace.getConfiguration('easy-headroom', resource).inspect<unknown>(key);
+  const narrower = TARGET_ORDER.slice(TARGET_ORDER.indexOf(target) + 1);
+  return narrower.filter((t) => {
+    if (t === 'Workspace') return inspected?.workspaceValue !== undefined;
+    if (t === 'WorkspaceFolder') return inspected?.workspaceFolderValue !== undefined;
+    return false;
+  });
+}
+
+export async function clearSetting(key: string, target: TargetName): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders;
+  const resource = target === 'WorkspaceFolder' && folders?.length === 1 ? folders[0].uri : undefined;
+  await vscode.workspace.getConfiguration('easy-headroom', resource).update(key, undefined, TARGET_ENUM[target]);
+}
