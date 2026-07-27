@@ -156,9 +156,11 @@ shared across multiple machines, and is designed separately.
    the same webview panel — see "RTK dashboard tab" below.
 9. **TokenSave install + indexing** — a third, independent optimization
    layer (semantic code-graph MCP server for Claude Code), installed
-   and registered automatically, with every open workspace folder
-   indexed (`tokensave init`/`sync`) so its own savings can be measured,
-   and kept fresh afterwards via root-repo git hooks plus a periodic
+   and registered automatically, with a single index at the project
+   root (`tokensave init`/`sync`) covering the whole project — including
+   submodules, since tokensave walks the directory tree rather than
+   following git boundaries — so its own savings can be measured, and
+   kept fresh afterwards via root-repo git hooks plus a periodic
    fallback timer — see "TokenSave install" and "TokenSave index
    freshness" below, plus its own dashboard tab — see "TokenSave
    dashboard tab" below.
@@ -493,29 +495,36 @@ install does.
 
 `ensureTokensaveIndexed` (activation-time) only covers the moment the
 window opens — for a long-lived window, the index can drift stale
-between activations. Two independent, best-effort mechanisms keep it
-fresh without requiring the user to remember to run `tokensave sync`:
+between activations. There is **one index for the whole project, at
+the project root** (`vscode.workspace.workspaceFolders[0]`) — not one
+per open workspace folder, since tokensave walks the directory tree
+rather than following git boundaries and already picks up submodule
+content (`docker/`, `vscode/`) under that same root. Two independent,
+best-effort mechanisms keep that single index fresh without requiring
+the user to remember to run `tokensave sync`:
 
 - **`installTokensaveGitHooks`** (`tokensave.ts`) writes idempotent,
   marker-guarded (`HOOK_MARKER`) hooks for `post-commit`/`post-merge`/
   `post-checkout`/`post-rewrite` — covering commit, pull, checkout, and
-  rebase/amend respectively — into each workspace folder's own
+  rebase/amend respectively — into the project root's own
   `.git/hooks/`, calling the tokensave binary via its stable absolute
   path (`storagePaths(context).tokensaveBinPath` never changes across
   version upgrades — the binary is overwritten in place). **Root
-  workspace folders only, deliberately**: the extension has no notion
+  workspace folder only, deliberately**: the extension has no notion
   of git submodules and must not walk into subdirectories looking for
-  nested `.git`s, so a folder is skipped (no hook installed) unless
-  its own `.git` is a real directory — a submodule working dir has a
+  nested `.git`s, so this is a no-op (no hook installed) unless the
+  root's own `.git` is a real directory — a submodule working dir has a
   `.git` *file* instead, pointing at `.git/modules/<name>` in the
   superproject, and is left alone. Any pre-existing hook content at
   that path is appended to, never overwritten, so a user's own custom
   hook survives.
-- **`TokensaveSyncTimer`** is the fallback for everything the root-only
-  hook can't reach — submodules, and any workspace folder without its
-  own `.git` — a simple 30-minute `setInterval` that re-runs the same
-  init-or-sync loop as activation itself (`ensureTokensaveIndexed`).
-  Same `start()`/`dispose()` lifecycle convention as
+- **`TokensaveSyncTimer`** is the fallback for changes the root-only
+  hook can't see — e.g. a commit made inside a submodule (`docker/`,
+  `vscode/`), which never fires the root repo's own hooks even though
+  that content is covered by the single project-root index — a simple
+  30-minute `setInterval` that re-runs the same init-or-sync call as
+  activation itself (`ensureTokensaveIndexed`). Same
+  `start()`/`dispose()` lifecycle convention as
   `RtkReportingWatcher`/`ProxyDaemonManager.startLifecycleTimers`,
   registered into `context.subscriptions`.
 
@@ -785,38 +794,25 @@ Backed by `tokensaveStats.ts` (`getTokensaveGain`/`getTokensaveHistory`/
 `getTokensaveStatus`, each a thin `runCapture(tokensaveBinPath, [...],
 cwd)` + `JSON.parse` around `tokensave gain --json`/`tokensave status
 --json`) plus `loadTokensaveDashboardData()` in `commands.ts`, which
-combines them per workspace folder.
-
-- **No native cross-folder concept, so the extension builds one**:
-  unlike RTK (one shared `history.db` with a `project` column) or
-  Headroom (one running instance), each TokenSave-indexed workspace
-  folder is a fully independent `.tokensave/` SQLite DB — `tokensave
-  gain`/`status` only ever answer for the cwd they're invoked in. The
-  "Folder" `<select>` (mirroring RTK's project picker) offers each
-  `vscode.workspace.workspaceFolders` entry plus an "All folders"
-  default; `loadTokensaveDashboardData()` handles "all" itself by
-  calling the CLI once per folder and summing/merging in the extension
-  host (gain totals added, `--history` points merged by day, `status`
-  counts summed, `files_by_language` merged key-by-key) — there is no
-  single CLI invocation that already does this.
+reads them for the single project-root folder
+(`vscode.workspace.workspaceFolders[0]`) — same one index the rest of
+TokenSave uses, see "TokenSave index freshness" above. No folder
+picker: unlike RTK's project `<select>`, there is exactly one index for
+the whole project, so nothing to switch between.
 - **Freshness, not just savings**: the other dashboard tabs (RTK, CO2)
   only ever show savings. TokenSave's `status` also carries index
-  health — symbol/file counts, DB size, and `last_sync_at` — so the tab
-  surfaces `oldestSyncAt` (the *least* recently synced folder when
-  "All folders" is selected, since that's the one where staleness would
-  actually show up) with a one-line note pointing at the git-hook +
-  30-minute-timer mechanism (see "TokenSave index freshness" above) as
-  the reason it's expected to stay fresh on its own.
+  health — symbol/file counts, DB size, and `last_sync_at` (surfaced as
+  `lastSyncAt`) — so the tab shows a one-line note pointing at the
+  git-hook + 30-minute-timer mechanism (see "TokenSave index freshness"
+  above) as the reason it's expected to stay fresh on its own.
 - **Range picker, not RTK's fixed daily/weekly/monthly**: `tokensave
   gain --range` only accepts `today`/`7d`/`30d`/`month`/`all` (no
   server-side weekly/monthly bucketing), so the tab has one history
   chart plus a range `<select>` instead of three fixed charts.
-- **Message-passing protocol**: webview → host sends a single
-  `{ type: 'tokensave:query', project, range }` on load and on either
-  `<select>` changing (unlike RTK's two separate message types) — both
-  values always travel together since either one can change
-  independently and the host needs both to answer. Host → webview
-  replies `{ type: 'tokensave:data', gain, history, status, projects }`.
+- **Message-passing protocol**: webview → host sends
+  `{ type: 'tokensave:query', range }` on load and on range `<select>`
+  change. Host → webview replies
+  `{ type: 'tokensave:data', gain, history, status }`.
 - **Degrades to "no data" on any CLI failure**: `runJson()` in
   `tokensaveStats.ts` catches and swallows every error (missing binary,
   never-indexed folder, malformed JSON) the same way RTK's dashboard

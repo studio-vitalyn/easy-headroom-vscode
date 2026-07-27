@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import { runCapture } from './tokensave';
 
 export type TokensaveRange = 'today' | '7d' | '30d' | 'month' | 'all';
@@ -27,15 +26,6 @@ export interface TokensaveStatus {
   last_sync_at: number;
   last_full_sync_at: number;
   files_by_language: Record<string, number>;
-}
-
-export interface TokensaveFolder {
-  name: string;
-  path: string;
-}
-
-export function getTokensaveFolders(): TokensaveFolder[] {
-  return (vscode.workspace.workspaceFolders ?? []).map((f) => ({ name: f.name, path: f.uri.fsPath }));
 }
 
 async function runJson<T>(tokensaveBinPath: string, args: string[], cwd: string): Promise<T | undefined> {

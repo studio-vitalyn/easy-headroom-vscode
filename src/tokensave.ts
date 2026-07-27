@@ -193,22 +193,21 @@ export interface TokensaveIndexFailure {
 }
 
 /**
- * Per-workspace-folder local index (`.tokensave/`) — `init` if it doesn't exist yet, `sync`
- * otherwise. Best-effort per folder, one failure doesn't block the others (same independence
- * philosophy as RTK's per-agent loop in `ensureRtkInitialized`).
+ * Single local index (`.tokensave/`) at the project root — `init` if it doesn't exist yet, `sync`
+ * otherwise. One instance covers the whole project (submodules included, since tokensave walks
+ * the directory tree rather than following git boundaries), not one per open workspace folder.
  */
 export async function ensureTokensaveIndexed(tokensaveBinPath: string): Promise<TokensaveIndexFailure[]> {
-  const failures: TokensaveIndexFailure[] = [];
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const cwd = folder.uri.fsPath;
-    try {
-      const initialized = await pathExists(path.join(cwd, '.tokensave'));
-      await runCapture(tokensaveBinPath, initialized ? ['sync'] : ['init'], cwd);
-    } catch (err) {
-      failures.push({ folder: folder.name, error: err as Error });
-    }
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return [];
+  const cwd = folder.uri.fsPath;
+  try {
+    const initialized = await pathExists(path.join(cwd, '.tokensave'));
+    await runCapture(tokensaveBinPath, initialized ? ['sync'] : ['init'], cwd);
+  } catch (err) {
+    return [{ folder: folder.name, error: err as Error }];
   }
-  return failures;
+  return [];
 }
 
 const HOOK_MARKER = '# easy-headroom: tokensave sync hook';
@@ -228,49 +227,50 @@ function hookScript(tokensaveBinPath: string, cwd: string): string {
 }
 
 /**
- * Best-effort, root workspace folders only — the extension has no submodule awareness, so this
- * never walks into subdirectories looking for nested `.git`s. A folder's own `.git` must be a real
- * directory (a submodule working dir has a `.git` *file* instead, pointing elsewhere) — that case
- * is silently skipped, same as any plain non-git folder, and falls back to `TokensaveSyncTimer`
- * instead. Appends to (never overwrites) an existing hook, guarded by `HOOK_MARKER` so re-running
- * this on every activation doesn't keep duplicating the block.
+ * Best-effort, project-root workspace folder only — the extension has no submodule awareness, so
+ * this never walks into subdirectories looking for nested `.git`s. The root folder's own `.git`
+ * must be a real directory (a submodule working dir has a `.git` *file* instead, pointing
+ * elsewhere) — that case is silently skipped, and `TokensaveSyncTimer` is the fallback. Appends to
+ * (never overwrites) an existing hook, guarded by `HOOK_MARKER` so re-running this on every
+ * activation doesn't keep duplicating the block.
  */
 export async function installTokensaveGitHooks(tokensaveBinPath: string): Promise<void> {
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const cwd = folder.uri.fsPath;
-    const gitDir = path.join(cwd, '.git');
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return;
+  const cwd = folder.uri.fsPath;
+  const gitDir = path.join(cwd, '.git');
+  try {
+    const stat = await fs.stat(gitDir);
+    if (!stat.isDirectory()) return;
+  } catch {
+    return;
+  }
+
+  const hooksDir = path.join(gitDir, 'hooks');
+  await fs.mkdir(hooksDir, { recursive: true });
+  for (const hookName of HOOKED_GIT_EVENTS) {
+    const hookFile = path.join(hooksDir, hookName);
+    let existing = '';
     try {
-      const stat = await fs.stat(gitDir);
-      if (!stat.isDirectory()) continue;
+      existing = await fs.readFile(hookFile, 'utf8');
     } catch {
-      continue;
+      // no existing hook for this event
     }
+    if (existing.includes(HOOK_MARKER)) continue;
 
-    const hooksDir = path.join(gitDir, 'hooks');
-    await fs.mkdir(hooksDir, { recursive: true });
-    for (const hookName of HOOKED_GIT_EVENTS) {
-      const hookFile = path.join(hooksDir, hookName);
-      let existing = '';
-      try {
-        existing = await fs.readFile(hookFile, 'utf8');
-      } catch {
-        // no existing hook for this event
-      }
-      if (existing.includes(HOOK_MARKER)) continue;
-
-      const script = hookScript(tokensaveBinPath, cwd);
-      const next = existing ? `${existing.trimEnd()}\n\n${script}` : script;
-      await fs.writeFile(hookFile, next, 'utf8');
-      await fs.chmod(hookFile, 0o755);
-    }
+    const script = hookScript(tokensaveBinPath, cwd);
+    const next = existing ? `${existing.trimEnd()}\n\n${script}` : script;
+    await fs.writeFile(hookFile, next, 'utf8');
+    await fs.chmod(hookFile, 0o755);
   }
 }
 
 const SYNC_INTERVAL_MS = 30 * 60 * 1000;
 
 /**
- * Fallback for whatever the root-only git hook can't reach — submodules, and any workspace
- * folder without its own `.git` directory. Re-runs the same init-or-sync loop as activation
+ * Fallback for changes the root-only git hook can't see — e.g. a commit made inside a submodule
+ * (`docker/`, `vscode/`), which never fires the root repo's own hooks even though that content is
+ * covered by the single project-root index. Re-runs the same init-or-sync call as activation
  * itself, just on a timer instead of only once per window open.
  */
 export class TokensaveSyncTimer {

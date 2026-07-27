@@ -13,13 +13,7 @@ import { removeRtkIntegration } from './rtkAgents';
 import { pathExists } from './archive';
 import { runCapture } from './tokensave';
 import { getRtkStats, getRtkProjects } from './rtkStats';
-import {
-  getTokensaveFolders,
-  getTokensaveGain,
-  getTokensaveHistory,
-  getTokensaveStatus,
-  type TokensaveRange,
-} from './tokensaveStats';
+import { getTokensaveGain, getTokensaveHistory, getTokensaveStatus, type TokensaveRange } from './tokensaveStats';
 import { computeCarbonEstimate, type CarbonEstimate } from './carbonFootprint';
 import {
   buildSettingsSnapshot,
@@ -141,14 +135,6 @@ function tokensaveDashboardAvailable(): boolean {
   return config.tokensaveEnabled();
 }
 
-export interface TokensaveDashboardProject {
-  name: string;
-  path: string;
-  saved_tokens: number;
-  indexed: boolean;
-  last_sync_at?: number;
-}
-
 export interface TokensaveDashboardData {
   gain: { saved_tokens: number; calls: number; usd: number };
   history: Array<{ day: number; saved_tokens: number; calls: number; usd: number }>;
@@ -158,81 +144,38 @@ export interface TokensaveDashboardData {
     file_count: number;
     db_size_bytes: number;
     files_by_language: Record<string, number>;
-    oldestSyncAt?: number;
+    lastSyncAt?: number;
   };
-  projects: TokensaveDashboardProject[];
 }
 
-/**
- * Scopes to a single workspace folder when `project` is one of `getTokensaveFolders()`'s paths,
- * otherwise aggregates across all of them — same "All projects" idea as RTK's project picker, but
- * computed here rather than natively by the CLI (tokensave has no cross-folder concept of its
- * own: each workspace folder is an entirely independent `.tokensave/` index, see tokensave.ts).
- */
+/** Single project-root `.tokensave/` index — see "TokenSave index freshness" in vscode/CLAUDE.md. */
 async function loadTokensaveDashboardData(
   tokensaveBinPath: string,
-  project: string | undefined,
   range: TokensaveRange
 ): Promise<TokensaveDashboardData> {
-  const folders = getTokensaveFolders();
-  const targets = project ? folders.filter((f) => f.path === project) : folders;
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!cwd) return { gain: { saved_tokens: 0, calls: 0, usd: 0 }, history: [] };
 
-  const perFolder = await Promise.all(
-    targets.map(async (folder) => ({
-      folder,
-      gain: await getTokensaveGain(tokensaveBinPath, folder.path, range),
-      history: await getTokensaveHistory(tokensaveBinPath, folder.path, range),
-      status: await getTokensaveStatus(tokensaveBinPath, folder.path),
-    }))
-  );
+  const [gain, history, status] = await Promise.all([
+    getTokensaveGain(tokensaveBinPath, cwd, range),
+    getTokensaveHistory(tokensaveBinPath, cwd, range),
+    getTokensaveStatus(tokensaveBinPath, cwd),
+  ]);
 
-  const gain = perFolder.reduce(
-    (acc, r) => ({
-      saved_tokens: acc.saved_tokens + (r.gain?.saved_tokens ?? 0),
-      calls: acc.calls + (r.gain?.calls ?? 0),
-      usd: acc.usd + (r.gain?.usd ?? 0),
-    }),
-    { saved_tokens: 0, calls: 0, usd: 0 }
-  );
-
-  const historyByDay = new Map<number, { day: number; saved_tokens: number; calls: number; usd: number }>();
-  for (const r of perFolder) {
-    for (const p of r.history ?? []) {
-      const cur = historyByDay.get(p.day) ?? { day: p.day, saved_tokens: 0, calls: 0, usd: 0 };
-      cur.saved_tokens += p.saved_tokens;
-      cur.calls += p.calls;
-      cur.usd += p.usd;
-      historyByDay.set(p.day, cur);
-    }
-  }
-  const history = Array.from(historyByDay.values()).sort((a, b) => a.day - b.day);
-
-  let status: TokensaveDashboardData['status'];
-  for (const r of perFolder) {
-    if (!r.status) continue;
-    if (!status) status = { node_count: 0, edge_count: 0, file_count: 0, db_size_bytes: 0, files_by_language: {} };
-    status.node_count += r.status.node_count;
-    status.edge_count += r.status.edge_count;
-    status.file_count += r.status.file_count;
-    status.db_size_bytes += r.status.db_size_bytes;
-    for (const [lang, count] of Object.entries(r.status.files_by_language)) {
-      status.files_by_language[lang] = (status.files_by_language[lang] ?? 0) + count;
-    }
-    // The least-recently-synced folder is the one worth surfacing — it's the one where staleness
-    // (if any) would actually show up.
-    status.oldestSyncAt =
-      status.oldestSyncAt === undefined ? r.status.last_sync_at : Math.min(status.oldestSyncAt, r.status.last_sync_at);
-  }
-
-  const projects: TokensaveDashboardProject[] = perFolder.map((r) => ({
-    name: r.folder.name,
-    path: r.folder.path,
-    saved_tokens: r.gain?.saved_tokens ?? 0,
-    indexed: Boolean(r.status),
-    last_sync_at: r.status?.last_sync_at,
-  }));
-
-  return { gain, history, status, projects };
+  return {
+    gain: gain ?? { saved_tokens: 0, calls: 0, usd: 0 },
+    history: history ?? [],
+    status: status
+      ? {
+          node_count: status.node_count,
+          edge_count: status.edge_count,
+          file_count: status.file_count,
+          db_size_bytes: status.db_size_bytes,
+          files_by_language: status.files_by_language,
+          lastSyncAt: status.last_sync_at,
+        }
+      : undefined,
+  };
 }
 
 function getNonce(): string {
@@ -490,8 +433,6 @@ ${
   tokensaveAvailable
     ? `  <div class="view${showTabs && defaultTab !== 'tokensave' ? ' hidden' : ''}" id="view-tokensave">
     <div class="rtk-toolbar">
-      <label for="ts-project-select">Folder</label>
-      <select id="ts-project-select"><option value="">All folders</option></select>
       <label for="ts-range-select">Range</label>
       <select id="ts-range-select">
         <option value="today">Today</option>
@@ -504,15 +445,13 @@ ${
     <div class="cards" id="ts-cards"></div>
     <div class="rtk-section-title">Savings history</div>
     <div class="chart" id="ts-history"></div>
-    <div class="empty hidden" id="ts-index-empty">No code-graph index yet for this folder.</div>
+    <div class="empty hidden" id="ts-index-empty">No code-graph index yet.</div>
     <div class="hidden" id="ts-index-content">
       <div class="rtk-section-title">Index freshness</div>
       <p class="co2-calc-disclaimer" id="ts-freshness"></p>
       <div class="rtk-section-title">Files by language</div>
       <table id="ts-lang-table"><thead><tr><th>Language</th><th>Files</th></tr></thead><tbody></tbody></table>
     </div>
-    <div class="rtk-section-title hidden" id="ts-projects-title">Folders</div>
-    <table class="hidden" id="ts-projects-table"><thead><tr><th>Folder</th><th>Saved tokens</th><th>Indexed</th><th>Last synced</th></tr></thead><tbody></tbody></table>
   </div>`
     : ''
 }
@@ -568,17 +507,13 @@ ${
     });
   }
 
-  const tsProjectSelect = document.getElementById('ts-project-select');
   const tsRangeSelect = document.getElementById('ts-range-select');
-  let tsProjectsPopulated = false;
   function queryTokensave() {
     vscode.postMessage({
       type: 'tokensave:query',
-      project: (tsProjectSelect && tsProjectSelect.value) || null,
       range: (tsRangeSelect && tsRangeSelect.value) || '30d',
     });
   }
-  if (tsProjectSelect) tsProjectSelect.addEventListener('change', queryTokensave);
   if (tsRangeSelect) tsRangeSelect.addEventListener('change', queryTokensave);
 
   function fmtNum(n) {
@@ -826,8 +761,8 @@ ${
     content.classList.remove('hidden');
     const freshnessEl = document.getElementById('ts-freshness');
     if (freshnessEl) {
-      freshnessEl.textContent = status.oldestSyncAt !== undefined
-        ? 'Last synced ' + fmtAgo(status.oldestSyncAt) + ' — kept fresh automatically by git hooks plus a 30-minute fallback timer.'
+      freshnessEl.textContent = status.lastSyncAt !== undefined
+        ? 'Last synced ' + fmtAgo(status.lastSyncAt) + ' — kept fresh automatically by git hooks plus a 30-minute fallback timer.'
         : '';
     }
     const langBody = document.querySelector('#ts-lang-table tbody');
@@ -837,22 +772,6 @@ ${
         '<tr><td>' + esc(lang) + '</td><td>' + fmtNum(count) + '</td></tr>'
       ).join('');
     }
-  }
-
-  function renderTsProjects(projects) {
-    const title = document.getElementById('ts-projects-title');
-    const tableEl = document.getElementById('ts-projects-table');
-    if (!title || !tableEl) return;
-    if (!projects || projects.length < 2) {
-      title.classList.add('hidden');
-      tableEl.classList.add('hidden');
-      return;
-    }
-    title.classList.remove('hidden');
-    tableEl.classList.remove('hidden');
-    tableEl.querySelector('tbody').innerHTML = projects.map((p) =>
-      '<tr><td>' + esc(p.name) + '</td><td>' + fmtNum(p.saved_tokens) + '</td><td>' + (p.indexed ? 'yes' : 'no') + '</td><td>' + fmtAgo(p.last_sync_at) + '</td></tr>'
-    ).join('');
   }
 
   // Group/label/type/description/scope all come from package.json's contributes.configuration
@@ -1025,18 +944,8 @@ ${
       renderTsCards(msg.gain, msg.status);
       renderTsHistory(msg.history);
       renderTsIndex(msg.status);
-      renderTsProjects(msg.projects);
       const metricEl = document.getElementById('tab-tokensave-metric');
       if (metricEl) metricEl.textContent = fmtNum(msg.gain.saved_tokens) + ' saved';
-      if (tsProjectSelect && !tsProjectsPopulated && msg.projects && msg.projects.length > 1) {
-        msg.projects.forEach((p) => {
-          const opt = document.createElement('option');
-          opt.value = p.path;
-          opt.textContent = p.name;
-          tsProjectSelect.appendChild(opt);
-        });
-        tsProjectsPopulated = true;
-      }
       return;
     }
     if (msg.type !== 'rtk:data') return;
@@ -1187,7 +1096,7 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
         return;
       }
       if (msg?.type === 'tokensave:query') {
-        const data = await loadTokensaveDashboardData(tokensaveBinPath, msg.project ?? undefined, msg.range ?? '30d');
+        const data = await loadTokensaveDashboardData(tokensaveBinPath, msg.range ?? '30d');
         void panel.webview.postMessage({ type: 'tokensave:data', ...data });
         return;
       }
