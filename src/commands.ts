@@ -13,6 +13,13 @@ import { removeRtkIntegration } from './rtkAgents';
 import { pathExists } from './archive';
 import { runCapture } from './tokensave';
 import { getRtkStats, getRtkProjects } from './rtkStats';
+import {
+  getTokensaveFolders,
+  getTokensaveGain,
+  getTokensaveHistory,
+  getTokensaveStatus,
+  type TokensaveRange,
+} from './tokensaveStats';
 import { computeCarbonEstimate, type CarbonEstimate } from './carbonFootprint';
 import { buildSettingsSnapshot, writeSetting, type TargetName } from './settingsMeta';
 
@@ -55,8 +62,8 @@ function startDashboardProxy(targetBase: string): Promise<number> {
       // easy-headroom itself only forwards headers through untouched (see docker/CLAUDE.md), and
       // the dashboard's own iframe/fetch calls, routed through this same local proxy, can't set
       // custom headers on their own — this is the one place to inject it for the whole dashboard.
-      if (config.headroomMode() === 'remote') {
-        const proxyToken = config.headroomProxyToken();
+      if (config.mode() === 'remote') {
+        const proxyToken = config.proxyToken();
         if (proxyToken) headers['x-headroom-proxy-token'] = proxyToken;
       }
       const proxyReq = lib.request(
@@ -122,6 +129,105 @@ function rtkDashboardAvailable(): boolean {
   return config.rtkEnabled() || Boolean(config.rtkAggregateEndpoint());
 }
 
+/** Unlike RTK/Headroom, TokenSave has no remote/aggregator mode — it's always a local CLI call. */
+function tokensaveDashboardAvailable(): boolean {
+  return config.tokensaveEnabled();
+}
+
+export interface TokensaveDashboardProject {
+  name: string;
+  path: string;
+  saved_tokens: number;
+  indexed: boolean;
+  last_sync_at?: number;
+}
+
+export interface TokensaveDashboardData {
+  gain: { saved_tokens: number; calls: number; usd: number };
+  history: Array<{ day: number; saved_tokens: number; calls: number; usd: number }>;
+  status?: {
+    node_count: number;
+    edge_count: number;
+    file_count: number;
+    db_size_bytes: number;
+    files_by_language: Record<string, number>;
+    oldestSyncAt?: number;
+  };
+  projects: TokensaveDashboardProject[];
+}
+
+/**
+ * Scopes to a single workspace folder when `project` is one of `getTokensaveFolders()`'s paths,
+ * otherwise aggregates across all of them — same "All projects" idea as RTK's project picker, but
+ * computed here rather than natively by the CLI (tokensave has no cross-folder concept of its
+ * own: each workspace folder is an entirely independent `.tokensave/` index, see tokensave.ts).
+ */
+async function loadTokensaveDashboardData(
+  tokensaveBinPath: string,
+  project: string | undefined,
+  range: TokensaveRange
+): Promise<TokensaveDashboardData> {
+  const folders = getTokensaveFolders();
+  const targets = project ? folders.filter((f) => f.path === project) : folders;
+
+  const perFolder = await Promise.all(
+    targets.map(async (folder) => ({
+      folder,
+      gain: await getTokensaveGain(tokensaveBinPath, folder.path, range),
+      history: await getTokensaveHistory(tokensaveBinPath, folder.path, range),
+      status: await getTokensaveStatus(tokensaveBinPath, folder.path),
+    }))
+  );
+
+  const gain = perFolder.reduce(
+    (acc, r) => ({
+      saved_tokens: acc.saved_tokens + (r.gain?.saved_tokens ?? 0),
+      calls: acc.calls + (r.gain?.calls ?? 0),
+      usd: acc.usd + (r.gain?.usd ?? 0),
+    }),
+    { saved_tokens: 0, calls: 0, usd: 0 }
+  );
+
+  const historyByDay = new Map<number, { day: number; saved_tokens: number; calls: number; usd: number }>();
+  for (const r of perFolder) {
+    for (const p of r.history ?? []) {
+      const cur = historyByDay.get(p.day) ?? { day: p.day, saved_tokens: 0, calls: 0, usd: 0 };
+      cur.saved_tokens += p.saved_tokens;
+      cur.calls += p.calls;
+      cur.usd += p.usd;
+      historyByDay.set(p.day, cur);
+    }
+  }
+  const history = Array.from(historyByDay.values()).sort((a, b) => a.day - b.day);
+
+  let status: TokensaveDashboardData['status'];
+  for (const r of perFolder) {
+    if (!r.status) continue;
+    if (!status) status = { node_count: 0, edge_count: 0, file_count: 0, db_size_bytes: 0, files_by_language: {} };
+    status.node_count += r.status.node_count;
+    status.edge_count += r.status.edge_count;
+    status.file_count += r.status.file_count;
+    status.db_size_bytes += r.status.db_size_bytes;
+    for (const [lang, count] of Object.entries(r.status.files_by_language)) {
+      status.files_by_language[lang] = (status.files_by_language[lang] ?? 0) + count;
+    }
+    // The least-recently-synced folder is the one worth surfacing — it's the one where staleness
+    // (if any) would actually show up.
+    status.oldestSyncAt =
+      status.oldestSyncAt === undefined ? r.status.last_sync_at : Math.min(status.oldestSyncAt, r.status.last_sync_at);
+  }
+
+  const projects: TokensaveDashboardProject[] = perFolder.map((r) => ({
+    name: r.folder.name,
+    path: r.folder.path,
+    saved_tokens: r.gain?.saved_tokens ?? 0,
+    indexed: Boolean(r.status),
+    last_sync_at: r.status?.last_sync_at,
+  }));
+
+  return { gain, history, status, projects };
+}
+
 function getNonce(): string {
   return crypto.randomBytes(16).toString('hex');
 }
@@ -177,27 +283,32 @@ async function extractHeadroomStats(raw: unknown): Promise<HeadroomLiveStats> {
 function renderDashboardHtml(opts: {
   headroomAvailable: boolean;
   rtkAvailable: boolean;
+  tokensaveAvailable: boolean;
   externalOrigin: string;
   iconUri: string;
   cspSource: string;
+  forceTab?: 'settings';
 }): string {
-  const { headroomAvailable, rtkAvailable, externalOrigin, iconUri, cspSource } = opts;
+  const { headroomAvailable, rtkAvailable, tokensaveAvailable, externalOrigin, iconUri, cspSource, forceTab } = opts;
   const nonce = getNonce();
   // CO2 needs Headroom's per-model token breakdown (see extractHeadroomStats), so it rides along
   // with the Headroom tab rather than being its own top-level availability check.
   const co2Available = headroomAvailable;
   // Only show a tab switcher when more than one view is actually available — otherwise there's
   // nothing to switch between, so skip straight to whichever single view applies. CO2 rides in
-  // third position, after both raw-data tabs.
-  const tabOrder: Array<'headroom' | 'rtk' | 'co2' | 'settings'> = [];
+  // last position, after all three raw-data tabs.
+  const tabOrder: Array<'headroom' | 'rtk' | 'tokensave' | 'co2' | 'settings'> = [];
   if (headroomAvailable) tabOrder.push('headroom');
   if (rtkAvailable) tabOrder.push('rtk');
+  if (tokensaveAvailable) tabOrder.push('tokensave');
   if (co2Available) tabOrder.push('co2');
   // Always present, even with everything else disabled — it's the only way to turn RTK/Headroom
   // back on from inside the dashboard once nothing else is showing.
   tabOrder.push('settings');
   const showTabs = tabOrder.length > 1;
-  const defaultTab = tabOrder[0];
+  // forceTab (set when Headroom is misconfigured) jumps straight to Settings instead of whatever
+  // tabOrder[0] would otherwise be, so the user lands on the fix rather than a broken/empty tab.
+  const defaultTab = forceTab ?? tabOrder[0];
   const csp = [
     "default-src 'none'",
     "style-src 'unsafe-inline'",
@@ -324,6 +435,10 @@ ${rtkAvailable ? `  <button class="tab-btn${defaultTab === 'rtk' ? ' active' : '
     <span class="tab-title">RTK</span>
     <span class="tab-metric" id="tab-rtk-metric">…</span>
   </button>` : ''}
+${tokensaveAvailable ? `  <button class="tab-btn${defaultTab === 'tokensave' ? ' active' : ''}" id="tab-tokensave" data-tab="tokensave">
+    <span class="tab-title">TokenSave</span>
+    <span class="tab-metric" id="tab-tokensave-metric">…</span>
+  </button>` : ''}
 ${co2Available ? `  <button class="tab-btn${defaultTab === 'co2' ? ' active' : ''}" id="tab-co2" data-tab="co2">
     <span class="tab-title">CO₂</span>
     <span class="tab-metric" id="tab-co2-metric">…</span>
@@ -365,6 +480,36 @@ ${
     : ''
 }
 ${
+  tokensaveAvailable
+    ? `  <div class="view${showTabs && defaultTab !== 'tokensave' ? ' hidden' : ''}" id="view-tokensave">
+    <div class="rtk-toolbar">
+      <label for="ts-project-select">Folder</label>
+      <select id="ts-project-select"><option value="">All folders</option></select>
+      <label for="ts-range-select">Range</label>
+      <select id="ts-range-select">
+        <option value="today">Today</option>
+        <option value="7d">7 days</option>
+        <option value="30d" selected>30 days</option>
+        <option value="month">Month</option>
+        <option value="all">All time</option>
+      </select>
+    </div>
+    <div class="cards" id="ts-cards"></div>
+    <div class="rtk-section-title">Savings history</div>
+    <div class="chart" id="ts-history"></div>
+    <div class="empty hidden" id="ts-index-empty">No code-graph index yet for this folder.</div>
+    <div class="hidden" id="ts-index-content">
+      <div class="rtk-section-title">Index freshness</div>
+      <p class="co2-calc-disclaimer" id="ts-freshness"></p>
+      <div class="rtk-section-title">Files by language</div>
+      <table id="ts-lang-table"><thead><tr><th>Language</th><th>Files</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="rtk-section-title hidden" id="ts-projects-title">Folders</div>
+    <table class="hidden" id="ts-projects-table"><thead><tr><th>Folder</th><th>Saved tokens</th><th>Indexed</th><th>Last synced</th></tr></thead><tbody></tbody></table>
+  </div>`
+    : ''
+}
+${
   co2Available
     ? `  <div class="view${showTabs && defaultTab !== 'co2' ? ' hidden' : ''}" id="view-co2">
     <div class="co2-intro">
@@ -394,12 +539,12 @@ ${
 (function() {
   const vscode = acquireVsCodeApi();
   const tabs = Array.from(document.querySelectorAll('.tab-btn'));
-  const views = { headroom: document.getElementById('view-headroom'), rtk: document.getElementById('view-rtk'), co2: document.getElementById('view-co2'), settings: document.getElementById('view-settings') };
-  tabs.forEach((btn) => btn.addEventListener('click', () => {
-    const tab = btn.dataset.tab;
-    tabs.forEach((b) => b.classList.toggle('active', b === btn));
+  const views = { headroom: document.getElementById('view-headroom'), rtk: document.getElementById('view-rtk'), tokensave: document.getElementById('view-tokensave'), co2: document.getElementById('view-co2'), settings: document.getElementById('view-settings') };
+  function activateTab(tab) {
+    tabs.forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
     Object.keys(views).forEach((key) => { if (views[key]) views[key].classList.toggle('hidden', key !== tab); });
-  }));
+  }
+  tabs.forEach((btn) => btn.addEventListener('click', () => activateTab(btn.dataset.tab)));
 
   const projectSelect = document.getElementById('project-select');
   let projectsPopulated = false;
@@ -415,6 +560,19 @@ ${
       vscode.postMessage({ type: 'rtk:selectProject', project: projectSelect.value || null });
     });
   }
+
+  const tsProjectSelect = document.getElementById('ts-project-select');
+  const tsRangeSelect = document.getElementById('ts-range-select');
+  let tsProjectsPopulated = false;
+  function queryTokensave() {
+    vscode.postMessage({
+      type: 'tokensave:query',
+      project: (tsProjectSelect && tsProjectSelect.value) || null,
+      range: (tsRangeSelect && tsRangeSelect.value) || '30d',
+    });
+  }
+  if (tsProjectSelect) tsProjectSelect.addEventListener('change', queryTokensave);
+  if (tsRangeSelect) tsRangeSelect.addEventListener('change', queryTokensave);
 
   function fmtNum(n) {
     if (n === undefined || n === null) return '–';
@@ -600,6 +758,96 @@ ${
     ).join('');
   }
 
+  function fmtAgo(unixSeconds) {
+    if (!unixSeconds) return 'never';
+    const diffMs = Date.now() - unixSeconds * 1000;
+    const mins = Math.round(diffMs / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return hours + 'h ago';
+    return Math.round(hours / 24) + 'd ago';
+  }
+
+  function fmtBytes(n) {
+    if (n === undefined || n === null) return '–';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (Math.round(n / 102.4) / 10) + ' KB';
+    return (Math.round(n / (1024 * 1024 * 10.24)) / 100) + ' MB';
+  }
+
+  function renderTsCards(gain, status) {
+    const el = document.getElementById('ts-cards');
+    if (!el) return;
+    const cards = [
+      ['Saved tokens', fmtNum(gain.saved_tokens)],
+      ['Cost saved', fmtUsd(gain.usd)],
+      ['Queries served', fmtNum(gain.calls)],
+    ];
+    if (status) {
+      cards.push(['Symbols indexed', fmtNum(status.node_count)]);
+      cards.push(['Files indexed', fmtNum(status.file_count)]);
+      cards.push(['Index size', fmtBytes(status.db_size_bytes)]);
+    }
+    el.innerHTML = cards.map(([label, value]) => '<div class="card"><div class="value">' + esc(value) + '</div><div class="label">' + esc(label) + '</div></div>').join('');
+  }
+
+  function renderTsHistory(points) {
+    const el = document.getElementById('ts-history');
+    if (!el) return;
+    if (!points || points.length === 0) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+    const values = points.map((p) => p.saved_tokens || 0);
+    const svg = buildTrendAreaSvg(values, 'ts-history-grad', '--vscode-charts-blue', 1.5);
+    const hotspots = points.map((p) => {
+      const label = new Date(p.day * 1000).toISOString().slice(0, 10);
+      const tooltip = label + ': ' + fmtNum(p.saved_tokens) + ' saved, ' + fmtNum(p.calls) + ' calls, ' + fmtUsd(p.usd);
+      return '<div class="hotspot" data-tooltip="' + esc(tooltip) + '"></div>';
+    }).join('');
+    el.innerHTML = svg + '<div class="hotspots">' + hotspots + '</div>';
+  }
+
+  function renderTsIndex(status) {
+    const empty = document.getElementById('ts-index-empty');
+    const content = document.getElementById('ts-index-content');
+    if (!empty || !content) return;
+    if (!status) {
+      empty.classList.remove('hidden');
+      content.classList.add('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    content.classList.remove('hidden');
+    const freshnessEl = document.getElementById('ts-freshness');
+    if (freshnessEl) {
+      freshnessEl.textContent = status.oldestSyncAt !== undefined
+        ? 'Last synced ' + fmtAgo(status.oldestSyncAt) + ' — kept fresh automatically by git hooks plus a 30-minute fallback timer.'
+        : '';
+    }
+    const langBody = document.querySelector('#ts-lang-table tbody');
+    if (langBody) {
+      const entries = Object.entries(status.files_by_language || {}).sort((a, b) => b[1] - a[1]);
+      langBody.innerHTML = entries.map(([lang, count]) =>
+        '<tr><td>' + esc(lang) + '</td><td>' + fmtNum(count) + '</td></tr>'
+      ).join('');
+    }
+  }
+
+  function renderTsProjects(projects) {
+    const title = document.getElementById('ts-projects-title');
+    const tableEl = document.getElementById('ts-projects-table');
+    if (!title || !tableEl) return;
+    if (!projects || projects.length < 2) {
+      title.classList.add('hidden');
+      tableEl.classList.add('hidden');
+      return;
+    }
+    title.classList.remove('hidden');
+    tableEl.classList.remove('hidden');
+    tableEl.querySelector('tbody').innerHTML = projects.map((p) =>
+      '<tr><td>' + esc(p.name) + '</td><td>' + fmtNum(p.saved_tokens) + '</td><td>' + (p.indexed ? 'yes' : 'no') + '</td><td>' + fmtAgo(p.last_sync_at) + '</td></tr>'
+    ).join('');
+  }
+
   // Group/label/type/description/scope all come from package.json's contributes.configuration
   // (see settingsMeta.ts) — this only builds the DOM and wires up writes, it doesn't hardcode
   // any of that metadata itself.
@@ -657,7 +905,7 @@ ${
           + '<div class="setting-label-row"><span class="setting-label">' + esc(item.label) + '</span></div>'
           + '<div class="setting-desc">' + esc(item.description) + '</div>'
           + '<div class="setting-control">' + renderValueControl(item) + '</div>'
-          // headroom.localPort has no scope picker of its own — it always follows headroom.mode's
+          // headroom.localPort has no scope picker of its own — it always follows mode's scope
           // (see send()/the data-scope-for listener below), since a port with no mode to go with it
           // makes no sense to store at a different scope.
           + (item.allowed.length > 1 && item.key !== 'headroom.localPort'
@@ -671,11 +919,11 @@ ${
       return byKey[key] ? byKey[key].value.effective : undefined;
     }
 
-    // Hardcoded, not a generic rules engine — this dashboard has exactly 5 conditional-visibility
+    // Hardcoded, not a generic rules engine — this dashboard has a handful of conditional-visibility
     // rules and they're small enough that a table would just add indirection.
     function updateVisibility() {
       const headroomEnabled = !!currentValue('headroom.enabled');
-      const headroomMode = currentValue('headroom.mode');
+      const mode = currentValue('mode');
       const rtkEnabled = !!currentValue('rtk.enabled');
       const tokensaveEnabled = !!currentValue('tokensave.enabled');
       const setRowVisible = (key, visible) => {
@@ -684,10 +932,11 @@ ${
       };
       setRowVisible('rtk.agents', rtkEnabled);
       setRowVisible('rtk.pinnedVersion', rtkEnabled);
-      setRowVisible('headroom.mode', headroomEnabled);
-      setRowVisible('headroom.remoteUrl', headroomEnabled && headroomMode === 'remote');
-      setRowVisible('headroom.proxyToken', headroomEnabled && headroomMode === 'remote');
-      setRowVisible('headroom.localPort', headroomEnabled && headroomMode === 'local');
+      // mode is project-wide (Headroom, RTK reporting, TokenSave), so it's always shown —
+      // unlike remoteUrl/proxyToken below, it doesn't depend on any single layer being enabled.
+      setRowVisible('remoteUrl', mode === 'remote');
+      setRowVisible('proxyToken', mode === 'remote');
+      setRowVisible('headroom.localPort', headroomEnabled && mode === 'local');
       setRowVisible('headroom.pinnedVersion', headroomEnabled);
       setRowVisible('tokensave.pinnedVersion', tokensaveEnabled);
     }
@@ -697,13 +946,13 @@ ${
       const row = el.querySelector('[data-row-for="' + key + '"]');
       if (!item || !row) return;
       // headroom.localPort has no scope-select of its own — it always writes at whatever
-      // scope headroom.mode is currently set to (see the data-scope-for listener below,
+      // scope mode is currently set to (see the data-scope-for listener below,
       // which re-sends localPort whenever mode's own scope changes).
       let target;
       if (key === 'headroom.localPort') {
-        const modeRow = el.querySelector('[data-row-for="headroom.mode"]');
+        const modeRow = el.querySelector('[data-row-for="mode"]');
         const modeScopeSelect = modeRow && modeRow.querySelector('.scope-select');
-        target = modeScopeSelect ? modeScopeSelect.value : (byKey['headroom.mode'] ? byKey['headroom.mode'].recommended : item.recommended);
+        target = modeScopeSelect ? modeScopeSelect.value : (byKey['mode'] ? byKey['mode'].recommended : item.recommended);
       } else {
         const scopeSelect = row.querySelector('.scope-select');
         target = scopeSelect ? scopeSelect.value : item.recommended;
@@ -722,7 +971,7 @@ ${
       } else {
         value = row.querySelector('input[type="text"]').value;
       }
-      // Optimistic local update so dependent rows (e.g. headroom.mode -> remoteUrl) react
+      // Optimistic local update so dependent rows (e.g. mode -> remoteUrl) react
       // immediately instead of waiting on the round trip through the extension host.
       item.value.effective = value;
       updateVisibility();
@@ -738,7 +987,7 @@ ${
       elm.addEventListener('change', () => {
         send(elm.dataset.scopeFor);
         // localPort is linked to mode's scope (see send()) — move it along whenever mode's own scope changes.
-        if (elm.dataset.scopeFor === 'headroom.mode') send('headroom.localPort');
+        if (elm.dataset.scopeFor === 'mode') send('headroom.localPort');
       });
     });
     el.querySelectorAll('[data-pick-version]').forEach((btn) => {
@@ -755,10 +1004,32 @@ ${
       renderSettings(msg.groups);
       return;
     }
+    if (msg.type === 'dashboard:focusTab') {
+      activateTab(msg.tab);
+      return;
+    }
     if (msg.type === 'headroom:stats') {
       renderHeadroomStats(msg.stats);
       latestCarbon = (msg.stats && msg.stats.carbon) || null;
       renderCo2(latestCarbon, latestRtkSaved);
+      return;
+    }
+    if (msg.type === 'tokensave:data') {
+      renderTsCards(msg.gain, msg.status);
+      renderTsHistory(msg.history);
+      renderTsIndex(msg.status);
+      renderTsProjects(msg.projects);
+      const metricEl = document.getElementById('tab-tokensave-metric');
+      if (metricEl) metricEl.textContent = fmtNum(msg.gain.saved_tokens) + ' saved';
+      if (tsProjectSelect && !tsProjectsPopulated && msg.projects && msg.projects.length > 1) {
+        msg.projects.forEach((p) => {
+          const opt = document.createElement('option');
+          opt.value = p.path;
+          opt.textContent = p.name;
+          tsProjectSelect.appendChild(opt);
+        });
+        tsProjectsPopulated = true;
+      }
       return;
     }
     if (msg.type !== 'rtk:data') return;
@@ -800,6 +1071,9 @@ ${
   if (document.getElementById('view-rtk')) {
     vscode.postMessage({ type: 'rtk:init' });
   }
+  if (document.getElementById('view-tokensave')) {
+    queryTokensave();
+  }
   vscode.postMessage({ type: 'settings:init' });
 })();
 </script>
@@ -808,25 +1082,35 @@ ${
 }
 
 async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
-  const headroomAvailable = config.headroomEnabled();
+  let headroomAvailable = config.headroomEnabled();
   const rtkAvailable = rtkDashboardAvailable();
+  const tokensaveAvailable = tokensaveDashboardAvailable();
+  const tokensaveBinPath = storagePaths(context).tokensaveBinPath;
   // Unlike the Headroom/RTK/CO2 tabs, Settings is always reachable — it's the only way to turn
   // RTK/Headroom back on from inside the dashboard once nothing else is showing.
 
   let targetBase = '';
+  // Set when Headroom is enabled but misconfigured (e.g. remote mode with no remoteUrl). We still
+  // open the dashboard in that case — just with Headroom's own tab disabled and Settings forced
+  // active — rather than blocking the whole webview behind a popup.
+  let headroomBroken = false;
   if (headroomAvailable) {
-    targetBase = config.headroomMode() === 'local'
+    targetBase = config.mode() === 'local'
       ? `http://127.0.0.1:${config.headroomLocalPort()}`
-      : config.headroomRemoteUrl().replace(/\/$/, '');
+      : config.remoteUrl().replace(/\/$/, '');
 
     if (!targetBase) {
-      void vscode.window.showErrorMessage('easy-headroom: headroom.remoteUrl is not set.');
-      return;
+      void vscode.window.showErrorMessage('easy-headroom: remoteUrl is not set.');
+      headroomBroken = true;
+      headroomAvailable = false;
     }
   }
 
   if (dashboardPanel) {
     dashboardPanel.reveal(vscode.ViewColumn.Active);
+    if (headroomBroken) {
+      void dashboardPanel.webview.postMessage({ type: 'dashboard:focusTab', tab: 'settings' });
+    }
     return;
   }
 
@@ -883,6 +1167,7 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
     async (msg: {
       type?: string;
       project?: string | null;
+      range?: TokensaveRange;
       key?: string;
       value?: unknown;
       target?: TargetName;
@@ -892,6 +1177,11 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
         const project = msg.type === 'rtk:selectProject' && msg.project ? msg.project : undefined;
         const [stats, projects] = await Promise.all([getRtkStats(project), getRtkProjects()]);
         void panel.webview.postMessage({ type: 'rtk:data', stats: stats ?? null, projects, selected: project ?? null });
+        return;
+      }
+      if (msg?.type === 'tokensave:query') {
+        const data = await loadTokensaveDashboardData(tokensaveBinPath, msg.project ?? undefined, msg.range ?? '30d');
+        void panel.webview.postMessage({ type: 'tokensave:data', ...data });
         return;
       }
       if (msg?.type === 'settings:init') {
@@ -928,30 +1218,16 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
   panel.webview.html = renderDashboardHtml({
     headroomAvailable,
     rtkAvailable,
+    tokensaveAvailable,
     externalOrigin,
     iconUri: iconUri.toString(),
     cspSource: panel.webview.cspSource,
+    forceTab: headroomBroken ? 'settings' : undefined,
   });
 }
 
 function openSettings(): void {
   void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:vitalyn.easy-headroom');
-}
-
-async function showStatusBarMenu(context: vscode.ExtensionContext): Promise<void> {
-  const picked = await vscode.window.showQuickPick(
-    [
-      { label: '$(dashboard) Open Dashboard', action: 'dashboard' as const },
-      { label: '$(gear) Open Settings', action: 'settings' as const },
-    ],
-    { placeHolder: 'easy-headroom' }
-  );
-  if (!picked) return;
-  if (picked.action === 'dashboard') {
-    await openDashboard(context);
-  } else {
-    openSettings();
-  }
 }
 
 async function selectRtkVersion(): Promise<void> {
@@ -1038,12 +1314,12 @@ async function uninstallCleanup(context: vscode.ExtensionContext, daemon: ProxyD
 }
 
 async function connectionTestBeforeRemote(): Promise<void> {
-  const url = config.headroomRemoteUrl();
+  const url = config.remoteUrl();
   if (!url) return;
   const healthy = await checkHealth(url);
   if (!healthy) {
     void vscode.window.showWarningMessage(
-      `easy-headroom: could not reach ${url}/health — check headroom.remoteUrl before relying on remote mode.`
+      `easy-headroom: could not reach ${url}/health — check remoteUrl before relying on remote mode.`
     );
   }
 }
@@ -1052,7 +1328,6 @@ export function registerCommands(context: vscode.ExtensionContext, daemon: Proxy
   context.subscriptions.push(
     vscode.commands.registerCommand('easy-headroom.openDashboard', () => openDashboard(context)),
     vscode.commands.registerCommand('easy-headroom.openSettings', openSettings),
-    vscode.commands.registerCommand('easy-headroom.statusBarMenu', () => showStatusBarMenu(context)),
     vscode.commands.registerCommand('easy-headroom.stopProxy', () => daemon.stop()),
     vscode.commands.registerCommand('easy-headroom.selectRtkVersion', selectRtkVersion),
     vscode.commands.registerCommand('easy-headroom.selectHeadroomVersion', selectHeadroomVersion),
@@ -1062,7 +1337,7 @@ export function registerCommands(context: vscode.ExtensionContext, daemon: Proxy
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('easy-headroom.headroom.remoteUrl') && config.headroomMode() === 'remote') {
+      if (e.affectsConfiguration('easy-headroom.remoteUrl') && config.mode() === 'remote') {
         void connectionTestBeforeRemote();
       }
     })

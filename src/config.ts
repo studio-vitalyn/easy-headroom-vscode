@@ -1,10 +1,22 @@
 import * as vscode from 'vscode';
 import { AgentId } from './rtkAgents';
 
-export type HeadroomMode = 'local' | 'remote';
+export type Mode = 'local' | 'remote';
 
 export function cfg(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration('easy-headroom');
+}
+
+/**
+ * Whether we're in remote mode with a usable shared-instance URL — single source of truth for
+ * every layer's remote-reporting endpoints (RTK today, TokenSave once it gains one). Independent
+ * of `headroom.enabled`: `mode` is project-wide, Headroom's own proxying is one layer among
+ * several that can each be on/off independently (see CLAUDE.md's "Guiding principle").
+ */
+function remoteBase(): string {
+  if (cfg().get<Mode>('mode', 'local') !== 'remote') return '';
+  const url = cfg().get<string>('remoteUrl', '');
+  return url ? url.replace(/\/+$/, '') : '';
 }
 
 export const config = {
@@ -12,50 +24,46 @@ export const config = {
   rtkAgents: (): AgentId[] => cfg().get<AgentId[]>('rtk.agents', ['claude']),
   rtkPinnedVersion: (): string => cfg().get<string>('rtk.pinnedVersion', ''),
 
+  /** Single source of truth for "are we in remote mode with a usable URL" — see `remoteBase`. */
+  remoteBaseUrl: (): string => remoteBase(),
+
   /**
-   * Derived, not user-configurable: RTK stats always report to the same Headroom instance
-   * used for API proxying, at its fixed /rtk/ingest route (see docker/CLAUDE.md). Only
-   * meaningful in remote mode — local mode has no ingest aggregator to report to.
+   * Derived, not user-configurable: RTK stats always report to the same shared instance's
+   * fixed /rtk/ingest route (see docker/CLAUDE.md). Only meaningful in remote mode — local mode
+   * has no ingest aggregator to report to.
    */
   rtkIngestEndpoint: (): string => {
-    if (!cfg().get<boolean>('headroom.enabled', false)) return '';
-    if (cfg().get<HeadroomMode>('headroom.mode', 'local') !== 'remote') return '';
-    const url = cfg().get<string>('headroom.remoteUrl', '');
-    return url ? `${url.replace(/\/+$/, '')}/rtk/ingest` : '';
+    const base = remoteBase();
+    return base ? `${base}/rtk/ingest` : '';
   },
 
   /** Same derivation as `rtkIngestEndpoint` — used at startup to reconcile the local push
    *  checkpoint against the server's actual last-seen id for this instance (see rtkReporting.ts). */
   rtkCheckpointEndpoint: (): string => {
-    if (!cfg().get<boolean>('headroom.enabled', false)) return '';
-    if (cfg().get<HeadroomMode>('headroom.mode', 'local') !== 'remote') return '';
-    const url = cfg().get<string>('headroom.remoteUrl', '');
-    return url ? `${url.replace(/\/+$/, '')}/rtk/checkpoint` : '';
+    const base = remoteBase();
+    return base ? `${base}/rtk/checkpoint` : '';
   },
 
   /** Same derivation as `rtkIngestEndpoint` — backs the RTK dashboard tab's remote-mode stats
    *  fetch (see rtkStats.ts). Empty in local mode: the dashboard reads history.db directly there. */
   rtkAggregateEndpoint: (): string => {
-    if (!cfg().get<boolean>('headroom.enabled', false)) return '';
-    if (cfg().get<HeadroomMode>('headroom.mode', 'local') !== 'remote') return '';
-    const url = cfg().get<string>('headroom.remoteUrl', '');
-    return url ? `${url.replace(/\/+$/, '')}/rtk/aggregate` : '';
+    const base = remoteBase();
+    return base ? `${base}/rtk/aggregate` : '';
   },
 
   /** Same derivation as `rtkAggregateEndpoint` — backs the RTK dashboard tab's project picker. */
   rtkProjectsEndpoint: (): string => {
-    if (!cfg().get<boolean>('headroom.enabled', false)) return '';
-    if (cfg().get<HeadroomMode>('headroom.mode', 'local') !== 'remote') return '';
-    const url = cfg().get<string>('headroom.remoteUrl', '');
-    return url ? `${url.replace(/\/+$/, '')}/rtk/projects` : '';
+    const base = remoteBase();
+    return base ? `${base}/rtk/projects` : '';
   },
 
   projectName: (): string => cfg().get<string>('projectName', ''),
 
+  mode: (): Mode => cfg().get<Mode>('mode', 'local'),
+  remoteUrl: (): string => cfg().get<string>('remoteUrl', ''),
+  proxyToken: (): string => cfg().get<string>('proxyToken', ''),
+
   headroomEnabled: (): boolean => cfg().get<boolean>('headroom.enabled', false),
-  headroomMode: (): HeadroomMode => cfg().get<HeadroomMode>('headroom.mode', 'local'),
-  headroomRemoteUrl: (): string => cfg().get<string>('headroom.remoteUrl', ''),
-  headroomProxyToken: (): string => cfg().get<string>('headroom.proxyToken', ''),
   headroomLocalPort: (): number => cfg().get<number>('headroom.localPort', 8787),
   headroomPinnedVersion: (): string => cfg().get<string>('headroom.pinnedVersion', ''),
 

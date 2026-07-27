@@ -210,3 +210,79 @@ export async function ensureTokensaveIndexed(tokensaveBinPath: string): Promise<
   }
   return failures;
 }
+
+const HOOK_MARKER = '# easy-headroom: tokensave sync hook';
+const HOOKED_GIT_EVENTS = ['post-commit', 'post-merge', 'post-checkout', 'post-rewrite'];
+
+function hookScript(tokensaveBinPath: string, cwd: string): string {
+  return [
+    '#!/usr/bin/env bash',
+    HOOK_MARKER,
+    `if [ -e "${cwd}/.tokensave/tokensave.db" ]; then`,
+    `  "${tokensaveBinPath}" sync "${cwd}" >/dev/null 2>&1 &`,
+    'else',
+    `  "${tokensaveBinPath}" init "${cwd}" >/dev/null 2>&1 &`,
+    'fi',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Best-effort, root workspace folders only — the extension has no submodule awareness, so this
+ * never walks into subdirectories looking for nested `.git`s. A folder's own `.git` must be a real
+ * directory (a submodule working dir has a `.git` *file* instead, pointing elsewhere) — that case
+ * is silently skipped, same as any plain non-git folder, and falls back to `TokensaveSyncTimer`
+ * instead. Appends to (never overwrites) an existing hook, guarded by `HOOK_MARKER` so re-running
+ * this on every activation doesn't keep duplicating the block.
+ */
+export async function installTokensaveGitHooks(tokensaveBinPath: string): Promise<void> {
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const cwd = folder.uri.fsPath;
+    const gitDir = path.join(cwd, '.git');
+    try {
+      const stat = await fs.stat(gitDir);
+      if (!stat.isDirectory()) continue;
+    } catch {
+      continue;
+    }
+
+    const hooksDir = path.join(gitDir, 'hooks');
+    await fs.mkdir(hooksDir, { recursive: true });
+    for (const hookName of HOOKED_GIT_EVENTS) {
+      const hookFile = path.join(hooksDir, hookName);
+      let existing = '';
+      try {
+        existing = await fs.readFile(hookFile, 'utf8');
+      } catch {
+        // no existing hook for this event
+      }
+      if (existing.includes(HOOK_MARKER)) continue;
+
+      const script = hookScript(tokensaveBinPath, cwd);
+      const next = existing ? `${existing.trimEnd()}\n\n${script}` : script;
+      await fs.writeFile(hookFile, next, 'utf8');
+      await fs.chmod(hookFile, 0o755);
+    }
+  }
+}
+
+const SYNC_INTERVAL_MS = 30 * 60 * 1000;
+
+/**
+ * Fallback for whatever the root-only git hook can't reach — submodules, and any workspace
+ * folder without its own `.git` directory. Re-runs the same init-or-sync loop as activation
+ * itself, just on a timer instead of only once per window open.
+ */
+export class TokensaveSyncTimer {
+  private timer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(private readonly tokensaveBinPath: string) {}
+
+  start(): void {
+    this.timer = setInterval(() => void ensureTokensaveIndexed(this.tokensaveBinPath), SYNC_INTERVAL_MS);
+  }
+
+  dispose(): void {
+    if (this.timer) clearInterval(this.timer);
+  }
+}

@@ -136,16 +136,19 @@ shared across multiple machines, and is designed separately.
 5. **RTK can run standalone**, with no notion of a proxy at all — this
    is the default case for a solo dev who only wants shell output
    compression.
-6. **Live RTK stats reporting**, `headroom.mode=remote` only — a
-   watcher on RTK's local SQLite DB, pushing new rows on every change
-   instead of relying on a periodic cron job, to the same remote
-   Headroom instance's `/rtk/ingest` route (`headroom.remoteUrl` +
-   `/rtk/ingest`, not a separately configured URL — see
-   `config.rtkIngestEndpoint`). Pushes raw per-command rows read
-   directly off the SQLite file, not `rtk gain`'s pre-aggregated
-   summary — see "RTK stats reporting — row-level sync" below. Never
-   runs in `local` mode, since local mode has no ingest aggregator to
-   report to.
+6. **Live RTK stats reporting**, `mode=remote` only — a watcher on
+   RTK's local SQLite DB, pushing new rows on every change instead of
+   relying on a periodic cron job, to the shared remote instance's
+   `/rtk/ingest` route (`remoteUrl` + `/rtk/ingest`, not a separately
+   configured URL — see `config.rtkIngestEndpoint`). Pushes raw
+   per-command rows read directly off the SQLite file, not `rtk
+   gain`'s pre-aggregated summary — see "RTK stats reporting —
+   row-level sync" below. Never runs in `local` mode, since local mode
+   has no ingest aggregator to report to. Independent of
+   `headroom.enabled` — `mode` is project-wide (see "Guiding
+   principle" at the end of this file), so RTK reports remotely
+   whenever `mode=remote`, whether or not Headroom's own proxy is
+   enabled.
 7. **Status bar** item with a state indicator (proxy up/down, RTK
    active) and a direct shortcut to the dashboard (`/dashboard` on the
    local or remote proxy, depending on mode).
@@ -154,10 +157,11 @@ shared across multiple machines, and is designed separately.
 9. **TokenSave install + indexing** — a third, independent optimization
    layer (semantic code-graph MCP server for Claude Code), installed
    and registered automatically, with every open workspace folder
-   indexed (`tokensave init`/`sync`) so its own savings can be measured
-   — see "TokenSave install" below. No dashboard tab yet: rolled out
-   first to gather real usage data before deciding whether one is
-   worth building.
+   indexed (`tokensave init`/`sync`) so its own savings can be measured,
+   and kept fresh afterwards via root-repo git hooks plus a periodic
+   fallback timer — see "TokenSave install" and "TokenSave index
+   freshness" below, plus its own dashboard tab — see "TokenSave
+   dashboard tab" below.
 10. **Settings tab**, alongside the others in the same webview panel —
     a simplified, per-setting scope picker on top of the same real
     `contributes.configuration` values, supplementing (not replacing)
@@ -193,30 +197,30 @@ infra URLs/API keys leaking into a repo through workspace settings.
     "scope": "resource",
     "description": "Project name used for Headroom's per-project attribution (/p/<slug>). Empty = auto-detected from the workspace/folder name. Unlike every other setting here, this is intentionally 'resource' scope, not 'machine'/'machine-overridable' — it identifies the project, not the host, so it's meant to be committed in the repo's own .vscode/settings.json rather than tied to a machine."
   },
+  "easy-headroom.mode": {
+    "type": "string",
+    "enum": ["local", "remote"],
+    "default": "local",
+    "scope": "machine-overridable",
+    "description": "Project-wide deployment mode, shared by every active layer (Headroom, RTK stats reporting, TokenSave). local = nothing runs against a shared instance ; remote = active layers report to/use the shared docker-easy-headroom instance at remoteUrl"
+  },
+  "easy-headroom.remoteUrl": {
+    "type": "string",
+    "default": "",
+    "scope": "machine",
+    "description": "URL of the shared docker-easy-headroom instance (required if mode = remote). Used by Headroom's own proxying (when headroom.enabled) and by RTK's stats reporting/aggregation, independently of each other"
+  },
+  "easy-headroom.proxyToken": {
+    "type": "string",
+    "default": "",
+    "scope": "machine",
+    "description": "Token for the remote docker-easy-headroom bundle, must match its HEADROOM_PROXY_TOKEN — sent as X-Headroom-Proxy-Token on the RTK stats reporting/checkpoint endpoints and every proxied Claude Code request (remote mode only)"
+  },
   "easy-headroom.headroom.enabled": {
     "type": "boolean",
     "default": false,
     "scope": "machine-overridable",
     "description": "Install and/or use Headroom (proxy compression + cache + output shaping)"
-  },
-  "easy-headroom.headroom.mode": {
-    "type": "string",
-    "enum": ["local", "remote"],
-    "default": "local",
-    "scope": "machine-overridable",
-    "description": "local = headroom proxy spawned and managed on this machine ; remote = use an already-deployed Headroom proxy elsewhere"
-  },
-  "easy-headroom.headroom.remoteUrl": {
-    "type": "string",
-    "default": "",
-    "scope": "machine",
-    "description": "URL of the remote Headroom proxy (required if mode = remote)"
-  },
-  "easy-headroom.headroom.proxyToken": {
-    "type": "string",
-    "default": "",
-    "scope": "machine",
-    "description": "Token for the remote Headroom bundle (headroom.remoteUrl), must match its HEADROOM_PROXY_TOKEN — sent as X-Headroom-Proxy-Token on the RTK stats reporting/checkpoint endpoints and every proxied Claude Code request (remote mode only)"
   },
   "easy-headroom.headroom.localPort": {
     "type": "number",
@@ -259,7 +263,23 @@ infra URLs/API keys leaking into a repo through workspace settings.
 | `rtk.enabled=true`, `headroom.enabled=true`, `mode=local` | RTK + a shared `headroom proxy` daemon for the whole machine (spawned on first need, reused by every window, with `HEADROOM_OUTPUT_SHAPER=1` — see "Start measuring" below), `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/p/<project-slug>`. |
 | `rtk.enabled=true`, `headroom.enabled=true`, `mode=remote` | Local RTK + `ANTHROPIC_BASE_URL=<remoteUrl>/p/<project-slug>`. No local Headroom process spawned, no headroom binary/venv needed on the client side — only the RTK CLI is installed. `HEADROOM_OUTPUT_SHAPER=1`/`headroom learn` don't apply here — nothing local to run them against. |
 | `rtk.enabled=false`, `headroom.enabled=true` | Headroom only (local or remote per `mode`), `ANTHROPIC_BASE_URL` set accordingly (with `/p/<project-slug>` suffix). RTK binary is never downloaded, `rtk init` is never called, `~/.claude/settings.json` is never touched for the RTK hook. Dev who only wants the API-side proxy/cache, no shell output compression. `headroom learn --verbosity` is skipped too (see below — it needs RTK active). |
-| `rtk.enabled=true`, `headroom.enabled=true`, `mode=remote` | (in addition to the row above) Active watcher on `~/.local/share/rtk/history.db` (or macOS equivalent `~/Library/Application Support/rtk/history.db`), reads new `commands` rows past the local checkpoint and pushes them to `headroom.remoteUrl/rtk/ingest`, ~2s debounce (SQLite WAL fires multiple fs events per transaction) — see "RTK stats reporting — row-level sync". Never started in `local` mode — no ingest aggregator to report to there. |
+| `rtk.enabled=true`, `mode=remote` | (independent of `headroom.enabled`) Active watcher on `~/.local/share/rtk/history.db` (or macOS equivalent `~/Library/Application Support/rtk/history.db`), reads new `commands` rows past the local checkpoint and pushes them to `remoteUrl/rtk/ingest`, ~2s debounce (SQLite WAL fires multiple fs events per transaction) — see "RTK stats reporting — row-level sync". Never started in `local` mode — no ingest aggregator to report to there. `mode` is project-wide, so this fires whether or not Headroom's own proxy is enabled — see "Guiding principle" below. |
+
+### Guiding principle — `mode` is project-wide, `headroom.enabled` is layer-specific
+
+`mode` (`local`/`remote`) and `remoteUrl`/`proxyToken` describe the
+shared `docker-easy-headroom` instance itself, not any one layer —
+they live at the top level of `contributes.configuration`, not nested
+under `headroom.*`. `headroom.enabled` only gates whether Headroom's
+own proxy (API compression/cache/output shaping) is used at all.
+The two used to be conflated (RTK's reporting endpoints derived from
+`headroom.enabled && headroom.mode==='remote'`, so disabling Headroom
+silently killed RTK's remote stats too — a real regression, see git
+history around the `mode`/`remoteUrl`/`proxyToken` rename). Every
+active layer — RTK today, TokenSave in the future — should
+independently check `mode`/`remoteUrl` via `config.remoteBaseUrl()`
+(or the per-layer endpoint helpers built on it, e.g.
+`rtkIngestEndpoint()`) rather than also checking `headroom.enabled`.
 
 ### "Start measuring" — output shaper + `headroom learn`
 
@@ -469,6 +489,41 @@ install does.
 - No MCP-level idempotency check needed on our side — see "MCP server
   registration" below.
 
+### TokenSave index freshness — git hooks + periodic fallback
+
+`ensureTokensaveIndexed` (activation-time) only covers the moment the
+window opens — for a long-lived window, the index can drift stale
+between activations. Two independent, best-effort mechanisms keep it
+fresh without requiring the user to remember to run `tokensave sync`:
+
+- **`installTokensaveGitHooks`** (`tokensave.ts`) writes idempotent,
+  marker-guarded (`HOOK_MARKER`) hooks for `post-commit`/`post-merge`/
+  `post-checkout`/`post-rewrite` — covering commit, pull, checkout, and
+  rebase/amend respectively — into each workspace folder's own
+  `.git/hooks/`, calling the tokensave binary via its stable absolute
+  path (`storagePaths(context).tokensaveBinPath` never changes across
+  version upgrades — the binary is overwritten in place). **Root
+  workspace folders only, deliberately**: the extension has no notion
+  of git submodules and must not walk into subdirectories looking for
+  nested `.git`s, so a folder is skipped (no hook installed) unless
+  its own `.git` is a real directory — a submodule working dir has a
+  `.git` *file* instead, pointing at `.git/modules/<name>` in the
+  superproject, and is left alone. Any pre-existing hook content at
+  that path is appended to, never overwritten, so a user's own custom
+  hook survives.
+- **`TokensaveSyncTimer`** is the fallback for everything the root-only
+  hook can't reach — submodules, and any workspace folder without its
+  own `.git` — a simple 30-minute `setInterval` that re-runs the same
+  init-or-sync loop as activation itself (`ensureTokensaveIndexed`).
+  Same `start()`/`dispose()` lifecycle convention as
+  `RtkReportingWatcher`/`ProxyDaemonManager.startLifecycleTimers`,
+  registered into `context.subscriptions`.
+
+Both are wired into `activate()` right after the initial
+`ensureTokensaveIndexed` call. Hook installation failure is logged only
+(`log()`), no popup — same "no popups, ever" treatment as any other
+non-critical setup step (see "Setup guidance" below).
+
 ### Wrap/init idempotency
 
 Before calling `rtk init --global --auto-patch[...]` for a given agent, check
@@ -611,14 +666,17 @@ would both try to bind the same port and collide.
     bar — that's what Headroom's own `/dashboard` is for, opened in an
     embedded VS Code tab on click (see below). No chart-drawing code
     lives in this extension.
-- Click → `easy-headroom.statusBarMenu` (`commands.ts`) shows a
-  `showQuickPick` with two entries, **Open Dashboard** / **Open
-  Settings**, rather than jumping straight to one or the other —
-  deliberate, since users otherwise have to hunt for an extension's
-  settings via the gear icon/Command Palette. Picking Dashboard opens
-  it **inside VS Code**, as a `WebviewPanel` tab (no address
-  bar/toolbar — that's just how webviews render, no extra flag
-  needed), rather than the system browser.
+- Click → `easy-headroom.openDashboard` (`commands.ts`), opening the
+  dashboard directly **inside VS Code** as a `WebviewPanel` tab (no
+  address bar/toolbar — that's just how webviews render, no extra
+  flag needed), rather than the system browser. No `showQuickPick`
+  detour anymore — now that the dashboard has its own Settings tab
+  (see "Settings tab" below), there's no reason to make users pick
+  between "Dashboard" and "Settings" before landing in the same
+  webview either way. `easy-headroom.openSettings` (native VS Code
+  settings UI, filtered to this extension) still exists as a separate
+  command for the Command Palette, just not wired to the status bar
+  click anymore.
   - Headroom's dashboard response sends both `X-Frame-Options: DENY`
     and a `Content-Security-Policy: frame-ancestors 'self'` header
     (confirmed empirically against a real `headroom proxy` — `curl -I`
@@ -668,7 +726,7 @@ Headroom proxy itself is configured).
 
 - **Tab buttons only when more than one view is available.**
   `showTabs = tabOrder.length > 1` (`tabOrder` built from
-  headroom/rtk/co2 availability, in that fixed order) gates the
+  headroom/rtk/tokensave/co2 availability, in that fixed order) gates the
   `.tab-btn` buttons inside `#tabbar`. If only one source is
   configured, that single view renders directly with no switcher UI —
   there's nothing to switch between. This is deliberate, not an
@@ -718,15 +776,67 @@ Headroom proxy itself is configured).
   in a running Extension Development Host — treat rendering/UX
   correctness as unverified until manually tested.
 
+### TokenSave dashboard tab
+
+Third tab in `tabOrder` (`headroom → rtk → tokensave → co2 → settings`),
+gated by `tokensaveDashboardAvailable()` (just `config.tokensaveEnabled()`
+— no remote/aggregator mode like RTK has, it's always a local CLI call).
+Backed by `tokensaveStats.ts` (`getTokensaveGain`/`getTokensaveHistory`/
+`getTokensaveStatus`, each a thin `runCapture(tokensaveBinPath, [...],
+cwd)` + `JSON.parse` around `tokensave gain --json`/`tokensave status
+--json`) plus `loadTokensaveDashboardData()` in `commands.ts`, which
+combines them per workspace folder.
+
+- **No native cross-folder concept, so the extension builds one**:
+  unlike RTK (one shared `history.db` with a `project` column) or
+  Headroom (one running instance), each TokenSave-indexed workspace
+  folder is a fully independent `.tokensave/` SQLite DB — `tokensave
+  gain`/`status` only ever answer for the cwd they're invoked in. The
+  "Folder" `<select>` (mirroring RTK's project picker) offers each
+  `vscode.workspace.workspaceFolders` entry plus an "All folders"
+  default; `loadTokensaveDashboardData()` handles "all" itself by
+  calling the CLI once per folder and summing/merging in the extension
+  host (gain totals added, `--history` points merged by day, `status`
+  counts summed, `files_by_language` merged key-by-key) — there is no
+  single CLI invocation that already does this.
+- **Freshness, not just savings**: the other dashboard tabs (RTK, CO2)
+  only ever show savings. TokenSave's `status` also carries index
+  health — symbol/file counts, DB size, and `last_sync_at` — so the tab
+  surfaces `oldestSyncAt` (the *least* recently synced folder when
+  "All folders" is selected, since that's the one where staleness would
+  actually show up) with a one-line note pointing at the git-hook +
+  30-minute-timer mechanism (see "TokenSave index freshness" above) as
+  the reason it's expected to stay fresh on its own.
+- **Range picker, not RTK's fixed daily/weekly/monthly**: `tokensave
+  gain --range` only accepts `today`/`7d`/`30d`/`month`/`all` (no
+  server-side weekly/monthly bucketing), so the tab has one history
+  chart plus a range `<select>` instead of three fixed charts.
+- **Message-passing protocol**: webview → host sends a single
+  `{ type: 'tokensave:query', project, range }` on load and on either
+  `<select>` changing (unlike RTK's two separate message types) — both
+  values always travel together since either one can change
+  independently and the host needs both to answer. Host → webview
+  replies `{ type: 'tokensave:data', gain, history, status, projects }`.
+- **Degrades to "no data" on any CLI failure**: `runJson()` in
+  `tokensaveStats.ts` catches and swallows every error (missing binary,
+  never-indexed folder, malformed JSON) the same way RTK's dashboard
+  tolerates an empty `history.db` — the tab shows its empty states
+  (`#ts-index-empty`, zeroed cards) rather than surfacing an error,
+  since a not-yet-indexed folder is an expected, common state, not a
+  bug.
+- **Not yet visually verified** — same caveat as the RTK tab above:
+  compiles and builds cleanly but hasn't been exercised in a running
+  Extension Development Host.
+
 ### CO2 tab (rides along with Headroom, not RTK)
 
 Its own dashboard tab (`#view-co2` in `renderDashboardHtml()`), shown
 whenever the Headroom tab is (`co2Available = headroomAvailable`) —
 folded into the same tab-order/`showTabs` logic as headroom/rtk rather
 than a separate availability check. Tab order is fixed as
-headroom → rtk → co2 (`tabOrder` in `renderDashboardHtml()`) — CO2 is
-the derived/secondary metric, so it sits last after the two tabs with
-their own raw data sources. Deliberately **not** available
+headroom → rtk → tokensave → co2 (`tabOrder` in `renderDashboardHtml()`)
+— CO2 is the derived/secondary metric, so it sits last after the tabs
+with their own raw data sources. Deliberately **not** available
 off RTK alone: RTK's schema (client SQLite and the Docker aggregator's
 `commands` table) has no model column at all, so it has no way to
 attribute tokens to a model, and per-model attribution is the whole
@@ -836,6 +946,21 @@ is more friction than this extension's needs warrant.
   nothing else is showing. When it's the sole available tab,
   `showTabs` is false and it renders directly (same convention as any
   single-tab case elsewhere in this file).
+- **Misconfigured Headroom jumps straight here instead of blocking the
+  whole webview**: if `headroom.enabled` is true but `mode`/`remoteUrl`
+  resolve to an empty target (e.g. remote mode with no `remoteUrl`
+  set), `openDashboard()` still shows the existing one-shot
+  `showErrorMessage` (no new popups — see "Setup guidance" below) but
+  no longer `return`s before creating the panel. It flips its local
+  `headroomAvailable` to false for the rest of the function (so the
+  Headroom iframe/proxy is skipped, same as if the layer were disabled
+  outright) and passes `forceTab: 'settings'` into
+  `renderDashboardHtml()`, which uses it in place of `tabOrder[0]` for
+  `defaultTab`. If the panel is already open, `openDashboard()` instead
+  posts a `dashboard:focusTab` message that the webview's script
+  handles via the same `activateTab()` helper the tab buttons'
+  click listeners call — the only message-driven (non-click) tab
+  switch in the dashboard.
 - **`contributes.configuration` in `package.json` is the single source
   of truth** for type/default/description/scope —
   `buildSettingsSnapshot()` reads it via
@@ -886,13 +1011,15 @@ is more friction than this extension's needs warrant.
   workspace — check before relying on it.
 - **Conditional visibility is hardcoded, not a rules engine** — same
   philosophy as the CO2/RTK special-casing elsewhere in this file:
-  `updateVisibility()` in the inline webview script has exactly 5
-  direct conditionals (hide `headroom.mode`/`remoteUrl`/`proxyToken`/
-  `localPort`/`pinnedVersion` unless `headroom.enabled`; further gate
-  `remoteUrl`/`proxyToken` on `mode === 'remote'` and `localPort` on
-  `mode === 'local'`; hide `rtk.agents`/`rtk.pinnedVersion` unless
-  `rtk.enabled`; hide `tokensave.pinnedVersion` unless
-  `tokensave.enabled`) and re-runs on every relevant field's `change`
+  `updateVisibility()` in the inline webview script hides
+  `remoteUrl`/`proxyToken` unless `mode === 'remote'` (`mode` itself is
+  always shown — it's project-wide, not tied to any one layer's
+  enabled flag, see "Guiding principle" above); hides
+  `headroom.localPort` unless `headroom.enabled && mode === 'local'`;
+  hides `headroom.pinnedVersion` unless `headroom.enabled`; hides
+  `rtk.agents`/`rtk.pinnedVersion` unless `rtk.enabled`; hides
+  `tokensave.pinnedVersion` unless `tokensave.enabled`. Re-runs on
+  every relevant field's `change`
   event via an optimistic local update to `item.value.effective`
   before the round trip to the extension host completes.
 - **Data flows by push, same as the RTK tab** — no settings snapshot
@@ -993,7 +1120,7 @@ that point) — so cleanup can't be automatic when the user clicks
 - Never log or transmit the actual content of shell commands beyond
   what RTK already stores natively (the reporting endpoint only relays
   what `rtk gain --format json` would expose anyway).
-- `headroom.proxyToken` is always sent as an `X-Headroom-Proxy-Token`
+- `proxyToken` is always sent as an `X-Headroom-Proxy-Token`
   header (never a query string, never `Authorization`), from three
   places, all `remote` mode only:
   - the RTK ingest and checkpoint endpoints (`rtkReporting.ts`);

@@ -175,7 +175,7 @@ async function installedHeadroomVersion(venvDir: string): Promise<string | undef
 export async function ensureHeadroomInstalled(
   context: vscode.ExtensionContext
 ): Promise<HeadroomInstallResult | undefined> {
-  if (!config.headroomEnabled() || config.headroomMode() !== 'local') return undefined;
+  if (!config.headroomEnabled() || config.mode() !== 'local') return undefined;
 
   const paths = storagePaths(context);
   const pinned = config.headroomPinnedVersion();

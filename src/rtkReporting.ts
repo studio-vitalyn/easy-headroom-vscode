@@ -12,7 +12,7 @@ async function fetchRemoteCheckpoint(instanceId: string): Promise<number | undef
   const endpoint = config.rtkCheckpointEndpoint();
   if (!endpoint) return undefined;
   const headers: Record<string, string> = {};
-  const proxyToken = config.headroomProxyToken();
+  const proxyToken = config.proxyToken();
   if (proxyToken) headers['X-Headroom-Proxy-Token'] = proxyToken;
   try {
     const res = await fetch(`${endpoint}?instance_id=${encodeURIComponent(instanceId)}`, { headers });
@@ -28,7 +28,7 @@ async function pushRows(instanceId: string, idProject: string, rows: unknown[]):
   const endpoint = config.rtkIngestEndpoint();
   if (!endpoint) return false;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const proxyToken = config.headroomProxyToken();
+  const proxyToken = config.proxyToken();
   if (proxyToken) headers['X-Headroom-Proxy-Token'] = proxyToken;
   try {
     const res = await fetch(endpoint, {

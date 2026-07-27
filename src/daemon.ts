@@ -81,7 +81,7 @@ export class ProxyDaemonManager {
     if (config.rtkEnabled()) {
       collection.prepend('PATH', this.paths.rtkBinDir + path.delimiter);
     }
-    if (config.headroomEnabled() && config.headroomMode() === 'local') {
+    if (config.headroomEnabled() && config.mode() === 'local') {
       collection.prepend('PATH', path.dirname(this.paths.headroomBinPath) + path.delimiter);
     }
     if (config.tokensaveEnabled()) {
@@ -96,7 +96,7 @@ export class ProxyDaemonManager {
     }
 
     const slug = projectSlug();
-    const base = config.headroomMode() === 'local' ? this.localBaseUrl() : config.headroomRemoteUrl().replace(/\/$/, '');
+    const base = config.mode() === 'local' ? this.localBaseUrl() : config.remoteUrl().replace(/\/$/, '');
     if (!base) {
       await clearProjectEnv(managedKeys);
       return;
@@ -108,12 +108,12 @@ export class ProxyDaemonManager {
     const vars: Record<string, string> = { ANTHROPIC_BASE_URL: baseUrl };
     const staleKeys: string[] = [];
 
-    if (config.headroomMode() === 'local') {
+    if (config.mode() === 'local') {
       vars.HEADROOM_OUTPUT_SHAPER = '1';
       staleKeys.push('ANTHROPIC_CUSTOM_HEADERS');
     } else {
       staleKeys.push('HEADROOM_OUTPUT_SHAPER');
-      const proxyToken = config.headroomProxyToken();
+      const proxyToken = config.proxyToken();
       if (proxyToken) {
         const customHeaders = `X-Headroom-Proxy-Token: ${proxyToken}`;
         collection.replace('ANTHROPIC_CUSTOM_HEADERS', customHeaders);
@@ -134,7 +134,7 @@ export class ProxyDaemonManager {
    */
   async ensureRunning(headroomBinPath: string, opts: { forceRestart?: boolean } = {}): Promise<void> {
     this.headroomBinPath = headroomBinPath;
-    if (config.headroomMode() !== 'local') return;
+    if (config.mode() !== 'local') return;
 
     const healthy = await checkHealth(this.localBaseUrl());
     if (healthy && !opts.forceRestart) return;

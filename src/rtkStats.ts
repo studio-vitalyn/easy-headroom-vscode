@@ -200,7 +200,7 @@ async function getLocalProjects(): Promise<RtkProjectSummary[]> {
 
 async function fetchJson<T>(url: string): Promise<T | undefined> {
   const headers: Record<string, string> = {};
-  const proxyToken = config.headroomProxyToken();
+  const proxyToken = config.proxyToken();
   if (proxyToken) headers['X-Headroom-Proxy-Token'] = proxyToken;
   try {
     const res = await fetch(url, { headers });

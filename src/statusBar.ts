@@ -70,7 +70,7 @@ export class HeadroomStatusBar {
     // misconfiguration/unreachability independently (see CLAUDE.md's "two independent layers"
     // principle) but only one button exists, so both feed the same visual signal.
     this.item.color = new vscode.ThemeColor(broken ? 'charts.red' : 'charts.green');
-    this.item.command = 'easy-headroom.statusBarMenu';
+    this.item.command = 'easy-headroom.openDashboard';
     this.item.show();
   }
 
@@ -99,11 +99,12 @@ export class HeadroomStatusBar {
     }
     md.appendMarkdown(`\n\n`);
 
-    md.appendMarkdown(`Headroom: ${config.headroomEnabled() ? `enabled (${config.headroomMode()})` : 'disabled'}`);
+    md.appendMarkdown(`Mode: ${config.mode()}\n\n`);
+    md.appendMarkdown(`Headroom: ${config.headroomEnabled() ? 'enabled' : 'disabled'}`);
     if (config.headroomEnabled()) {
       if (state === 'not-initialized') {
         md.appendMarkdown(
-          config.headroomMode() === 'remote' ? ' — ⚠️ headroom.remoteUrl is not set' : ' — ⚠️ misconfigured'
+          config.mode() === 'remote' ? ' — ⚠️ remoteUrl is not set' : ' — ⚠️ misconfigured'
         );
       } else if (state === 'error') {
         md.appendMarkdown(' — ⚠️ proxy unreachable');
@@ -114,15 +115,15 @@ export class HeadroomStatusBar {
     if (gain?.totalSaved !== undefined) {
       md.appendMarkdown(`Total saved: ${gain.totalSaved.toLocaleString()}\n\n`);
     }
-    md.appendMarkdown(`Click for options (dashboard, settings).`);
+    md.appendMarkdown(`Click to open the dashboard.`);
     return md;
   }
 
   private async computeState(): Promise<DaemonState> {
     if (!config.headroomEnabled()) return 'ok';
-    const base = config.headroomMode() === 'local'
+    const base = config.mode() === 'local'
       ? `http://127.0.0.1:${config.headroomLocalPort()}`
-      : config.headroomRemoteUrl();
+      : config.remoteUrl();
     if (!base) return 'not-initialized';
     const healthy = await checkHealth(base);
     return healthy ? 'ok' : 'error';

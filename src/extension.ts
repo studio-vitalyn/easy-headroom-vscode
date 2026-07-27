@@ -7,7 +7,13 @@ import {
   ensureHeadroomMcpInstalled,
   runHeadroomLearn,
 } from './headroom';
-import { ensureTokensaveInstalled, ensureTokensaveMcpInstalled, ensureTokensaveIndexed } from './tokensave';
+import {
+  ensureTokensaveInstalled,
+  ensureTokensaveMcpInstalled,
+  ensureTokensaveIndexed,
+  installTokensaveGitHooks,
+  TokensaveSyncTimer,
+} from './tokensave';
 import { ProxyDaemonManager } from './daemon';
 import { HeadroomStatusBar } from './statusBar';
 import { RtkReportingWatcher } from './rtkReporting';
@@ -18,6 +24,7 @@ import { outputChannel, log } from './log';
 let daemon: ProxyDaemonManager | undefined;
 let statusBar: HeadroomStatusBar | undefined;
 let reportingWatcher: RtkReportingWatcher | undefined;
+let tokensaveSyncTimer: TokensaveSyncTimer | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   context.subscriptions.push(outputChannel);
@@ -48,7 +55,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   if (config.headroomEnabled()) {
     try {
-      if (config.headroomMode() === 'local') {
+      if (config.mode() === 'local') {
         const headroom = await ensureHeadroomInstalled(context);
         if (!headroom) {
           log('Headroom setup skipped — no working Python 3.10+ interpreter found');
@@ -87,6 +94,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         log(`TokenSave indexing failed for: ${list}`);
         void vscode.window.showWarningMessage(`easy-headroom: TokenSave indexing failed for: ${list}`);
       }
+
+      try {
+        await installTokensaveGitHooks(tokensaveBinPath);
+      } catch (err) {
+        log(`TokenSave git hook install failed — ${formatError(err)}`);
+      }
+
+      tokensaveSyncTimer = new TokensaveSyncTimer(tokensaveBinPath);
+      tokensaveSyncTimer.start();
+      context.subscriptions.push({ dispose: () => tokensaveSyncTimer?.dispose() });
     }
   } catch (err) {
     log(`TokenSave setup failed — ${formatError(err)}`);

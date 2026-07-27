@@ -17,10 +17,10 @@ const LABELS: Record<string, string> = {
   'rtk.enabled': 'Enable RTK',
   'rtk.agents': 'Agents',
   'rtk.pinnedVersion': 'Pinned version',
+  mode: 'Mode',
+  remoteUrl: 'Remote URL',
+  proxyToken: 'Proxy token',
   'headroom.enabled': 'Enable Headroom',
-  'headroom.mode': 'Mode',
-  'headroom.remoteUrl': 'Remote URL',
-  'headroom.proxyToken': 'Proxy token',
   'headroom.localPort': 'Local port',
   'headroom.pinnedVersion': 'Pinned version',
   'tokensave.enabled': 'Enable TokenSave',
@@ -61,7 +61,7 @@ interface WorkspaceContext {
  * (documented on the extension manifest schema, not in @types/vscode — confirmed against the installed
  * typings that the *write* API only has 3 targets: Global/Workspace/WorkspaceFolder, no separate "Remote"
  * one). `machine`/`application` block Workspace and Folder entirely (that's the whole point of those
- * scopes — e.g. a committed .vscode/settings.json can't silently redirect headroom.remoteUrl).
+ * scopes — e.g. a committed .vscode/settings.json can't silently redirect remoteUrl).
  * `machine-overridable` allowing Workspace but not Folder is the one assumption here not verified against
  * a real multi-root workspace — treat as unconfirmed until manually tested.
  */
