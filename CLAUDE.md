@@ -788,38 +788,64 @@ Headroom proxy itself is configured).
 ### TokenSave dashboard tab
 
 Third tab in `tabOrder` (`headroom → rtk → tokensave → co2 → settings`),
-gated by `tokensaveDashboardAvailable()` (just `config.tokensaveEnabled()`
-— no remote/aggregator mode like RTK has, it's always a local CLI call).
-Backed by `tokensaveStats.ts` (`getTokensaveGain`/`getTokensaveHistory`/
-`getTokensaveStatus`, each a thin `runCapture(tokensaveBinPath, [...],
-cwd)` + `JSON.parse` around `tokensave gain --json`/`tokensave status
---json`) plus `loadTokensaveDashboardData()` in `commands.ts`, which
-reads them for the single project-root folder
-(`vscode.workspace.workspaceFolders[0]`) — same one index the rest of
-TokenSave uses, see "TokenSave index freshness" above. No folder
-picker: unlike RTK's project `<select>`, there is exactly one index for
-the whole project, so nothing to switch between.
-- **Freshness, not just savings**: the other dashboard tabs (RTK, CO2)
-  only ever show savings. TokenSave's `status` also carries index
-  health — symbol/file counts, DB size, and `last_sync_at` (surfaced as
-  `lastSyncAt`) — so the tab shows a one-line note pointing at the
-  git-hook + 30-minute-timer mechanism (see "TokenSave index freshness"
-  above) as the reason it's expected to stay fresh on its own.
-- **Range picker, not RTK's fixed daily/weekly/monthly**: `tokensave
-  gain --range` only accepts `today`/`7d`/`30d`/`month`/`all` (no
-  server-side weekly/monthly bucketing), so the tab has one history
-  chart plus a range `<select>` instead of three fixed charts.
-- **Message-passing protocol**: webview → host sends
-  `{ type: 'tokensave:query', range }` on load and on range `<select>`
-  change. Host → webview replies
-  `{ type: 'tokensave:data', gain, history, status }`.
-- **Degrades to "no data" on any CLI failure**: `runJson()` in
-  `tokensaveStats.ts` catches and swallows every error (missing binary,
-  never-indexed folder, malformed JSON) the same way RTK's dashboard
-  tolerates an empty `history.db` — the tab shows its empty states
-  (`#ts-index-empty`, zeroed cards) rather than surfacing an error,
-  since a not-yet-indexed folder is an expected, common state, not a
-  bug.
+gated by `tokensaveDashboardAvailable()` (`config.tokensaveEnabled()`
+OR a non-empty `config.tokensaveAggregateEndpoint()` — same
+local-or-remote-aggregator "is it available" logic as RTK's own
+`rtkDashboardAvailable()`, now that TokenSave has a remote mode too).
+`loadTokensaveDashboardData()` in `commands.ts` dispatches on
+`tokensaveUseRemote()` (`Boolean(config.tokensaveAggregateEndpoint())`):
+local mode reads via `tokensaveStats.ts` (`getTokensaveGain`/
+`getTokensaveHistory`/`getTokensaveStatus`, each a thin
+`runCapture(tokensaveBinPath, [...], cwd)` + `JSON.parse` around
+`tokensave gain --json`/`tokensave status --json`) for the single
+project-root folder (`vscode.workspace.workspaceFolders[0]`) — same
+one index the rest of TokenSave uses, see "TokenSave index freshness"
+above; remote mode instead fetches `getRemoteTokensaveStats()`/
+`getRemoteTokensaveProjects()` (`tokensaveStats.ts`, same
+attach-the-proxy-token-and-swallow-failures pattern as `rtkStats.ts`'s
+remote path).
+- **Project selector, remote mode only** — mirrors RTK's exactly: a
+  project `<select>` defaulting to the current project rather than
+  "all projects" (`currentTokensaveProjectId()` — `projectSlug()` when
+  `config.tokensaveAggregateEndpoint()` is set, since `id_project`
+  server-side is the slug there, same
+  `vscode.workspace.workspaceFolders[0]?.uri.fsPath` fallback otherwise
+  as RTK's `currentRtkProjectId()`), plus a project breakdown table fed
+  by `getRemoteTokensaveProjects()`. Local mode still has no folder
+  picker at all: there is exactly one index for the whole workspace, so
+  nothing to switch between.
+- **Freshness, not just savings — local mode only**: index health
+  (symbol/file counts, DB size, `last_sync_at` surfaced as
+  `lastSyncAt`) only comes from the local CLI's `status` call — the
+  remote aggregator has no index-health concept, so `status` is
+  `undefined` in remote mode and the freshness note is skipped there.
+- **Range picker, not RTK's fixed daily/weekly/monthly — local mode
+  only**: `tokensave gain --range` only accepts
+  `today`/`7d`/`30d`/`month`/`all` (no server-side weekly/monthly
+  bucketing), so local mode has one history chart plus a range
+  `<select>` instead of three fixed charts. Remote mode instead reuses
+  RTK's fixed daily/weekly/monthly buckets, since `/tokensave/aggregate`
+  mirrors `/rtk/aggregate`'s response shape exactly (see
+  `docker/CLAUDE.md`'s "TokenSave data model").
+- **`usd` is always `0` in remote mode**: the remote aggregator's
+  `savings` table has no dollar-cost column (see "TokenSave data
+  model"), unlike the local CLI's `gain`/`history`, which do carry a
+  real `usd` figure — `loadTokensaveDashboardData()` hardcodes `usd: 0`
+  on every remote-mode `gain`/`history` point rather than fabricating a
+  conversion the server has no basis for.
+- **Message-passing protocol**, mirroring RTK's `rtk:init`/
+  `rtk:selectProject` split: webview → host sends
+  `{ type: 'tokensave:init' }` on load and
+  `{ type: 'tokensave:query', range, project }` on range or project
+  `<select>` change; host → webview replies
+  `{ type: 'tokensave:data', gain, history, status, projects, selected }`.
+- **Degrades to "no data" on any failure**: `runJson()` in
+  `tokensaveStats.ts` catches and swallows every local-CLI error
+  (missing binary, never-indexed folder, malformed JSON) the same way
+  RTK's dashboard tolerates an empty `history.db`; `getRemoteTokensaveStats`/
+  `getRemoteTokensaveProjects` do the same for the remote path (network
+  failure, non-2xx, malformed body) — the tab shows its empty states
+  (`#ts-index-empty`, zeroed cards) rather than surfacing an error.
 - **Not yet visually verified** — same caveat as the RTK tab above:
   compiles and builds cleanly but hasn't been exercised in a running
   Extension Development Host.
@@ -1132,18 +1158,28 @@ that point) — so cleanup can't be automatic when the user clicks
   what RTK already stores natively (the reporting endpoint only relays
   what `rtk gain --format json` would expose anyway).
 - `proxyToken` is always sent as an `X-Headroom-Proxy-Token`
-  header (never a query string, never `Authorization`), from three
+  header (never a query string, never `Authorization`), from these
   places, all `remote` mode only:
-  - the RTK ingest and checkpoint endpoints (`rtkReporting.ts`);
+  - the RTK ingest and checkpoint endpoints (`rtkReporting.ts`), and
+    the RTK dashboard tab's remote aggregate/projects fetch
+    (`rtkStats.ts`);
+  - the TokenSave ingest and checkpoint endpoints
+    (`tokensaveReporting.ts`), and the TokenSave dashboard tab's remote
+    aggregate/projects fetch (`tokensaveStats.ts`) — same pattern as
+    RTK's, one layer over;
   - every proxied Claude Code request, via the `ANTHROPIC_CUSTOM_HEADERS`
     env var (Claude Code's own mechanism for attaching extra headers to
     outbound API requests), set through `applyProjectEnv` in
     `daemon.ts`'s `applyEnvironment`;
-  - the dashboard webview's traffic, attached by the extension's own
-    local reverse proxy (`startDashboardProxy` in `commands.ts`) on
-    every request it forwards — the one place this can be done for
-    the dashboard, since neither a plain browser nor Headroom's own
-    client-rendered dashboard JS can set a custom header on themselves.
+  - the dashboard webview's Headroom-iframe traffic, attached by the
+    extension's own local reverse proxy (`startDashboardProxy` in
+    `commands.ts`) on every request it forwards — the one place this
+    can be done for that traffic, since neither a plain browser nor
+    Headroom's own client-rendered dashboard JS can set a custom header
+    on themselves. (The RTK/TokenSave tabs' own remote fetches don't go
+    through this proxy at all — the extension host makes those requests
+    directly, attaching the header itself, same trust boundary as every
+    other filesystem/network access this extension does.)
 
   Deliberately not `Authorization` in any of these: that header already
   carries the user's real Anthropic OAuth/API credentials on the proxied

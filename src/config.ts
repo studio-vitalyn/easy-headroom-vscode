@@ -70,6 +70,31 @@ export const config = {
   tokensaveEnabled: (): boolean => cfg().get<boolean>('tokensave.enabled', true),
   tokensavePinnedVersion: (): string => cfg().get<string>('tokensave.pinnedVersion', ''),
 
+  /** Same derivation/rationale as `rtkIngestEndpoint`, under TokenSave's own `/tokensave/*` route. */
+  tokensaveIngestEndpoint: (): string => {
+    const base = remoteBase();
+    return base ? `${base}/tokensave/ingest` : '';
+  },
+
+  /** Same derivation as `tokensaveIngestEndpoint` — see rtkCheckpointEndpoint. */
+  tokensaveCheckpointEndpoint: (): string => {
+    const base = remoteBase();
+    return base ? `${base}/tokensave/checkpoint` : '';
+  },
+
+  /** Same derivation as `tokensaveIngestEndpoint` — backs the TokenSave dashboard tab's remote-mode
+   *  stats fetch (see tokensaveStats.ts). Empty in local mode: the dashboard shells out to the CLI. */
+  tokensaveAggregateEndpoint: (): string => {
+    const base = remoteBase();
+    return base ? `${base}/tokensave/aggregate` : '';
+  },
+
+  /** Same derivation as `tokensaveAggregateEndpoint` — backs the TokenSave dashboard's project picker. */
+  tokensaveProjectsEndpoint: (): string => {
+    const base = remoteBase();
+    return base ? `${base}/tokensave/projects` : '';
+  },
+
   setRtkPinnedVersion: (version: string): Thenable<void> =>
     cfg().update('rtk.pinnedVersion', version, vscode.ConfigurationTarget.Global),
   setHeadroomPinnedVersion: (version: string): Thenable<void> =>

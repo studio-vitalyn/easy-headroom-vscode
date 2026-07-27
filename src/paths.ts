@@ -57,6 +57,24 @@ export function rtkLastPushedIdPath(): string {
   return path.join(path.dirname(rtkHistoryDbPath()), '.easy-headroom-last-pushed-id');
 }
 
+/**
+ * Fixed path on every platform — unlike RTK's history.db (`rtkHistoryDbPath()`), TokenSave's own
+ * global ledger doesn't vary by OS. Confirmed against a real `~/.tokensave/global.db`.
+ */
+export function tokensaveGlobalDbPath(): string {
+  return path.join(os.homedir(), '.tokensave', 'global.db');
+}
+
+/** Same rationale as `rtkInstanceIdPath` — see tokensaveSyncState.ts. */
+export function tokensaveInstanceIdPath(): string {
+  return path.join(path.dirname(tokensaveGlobalDbPath()), '.easy-headroom-instance-id');
+}
+
+/** Same rationale as `tokensaveInstanceIdPath` — see tokensaveSyncState.ts. */
+export function tokensaveLastPushedIdPath(): string {
+  return path.join(path.dirname(tokensaveGlobalDbPath()), '.easy-headroom-last-pushed-id');
+}
+
 export function storagePaths(context: vscode.ExtensionContext) {
   const root = context.globalStorageUri.fsPath;
   return {

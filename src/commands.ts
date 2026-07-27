@@ -13,7 +13,16 @@ import { removeRtkIntegration } from './rtkAgents';
 import { pathExists } from './archive';
 import { runCapture } from './tokensave';
 import { getRtkStats, getRtkProjects } from './rtkStats';
-import { getTokensaveGain, getTokensaveHistory, getTokensaveStatus, type TokensaveRange } from './tokensaveStats';
+import { projectSlug } from './slug';
+import {
+  getTokensaveGain,
+  getTokensaveHistory,
+  getTokensaveStatus,
+  getRemoteTokensaveStats,
+  getRemoteTokensaveProjects,
+  tokensaveUseRemote,
+  type TokensaveRange,
+} from './tokensaveStats';
 import { computeCarbonEstimate, type CarbonEstimate } from './carbonFootprint';
 import {
   buildSettingsSnapshot,
@@ -130,9 +139,21 @@ function rtkDashboardAvailable(): boolean {
   return config.rtkEnabled() || Boolean(config.rtkAggregateEndpoint());
 }
 
-/** Unlike RTK/Headroom, TokenSave has no remote/aggregator mode — it's always a local CLI call. */
+/**
+ * Dashboard's default project filter: the current workspace, not "all projects" — matches the
+ * `id_project` values rtkStats.ts hands out for whichever mode is active (raw `project_path` for
+ * the local history.db, `projectSlug()` for the remote aggregator).
+ */
+function currentRtkProjectId(): string | undefined {
+  return config.rtkAggregateEndpoint() ? projectSlug() : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
 function tokensaveDashboardAvailable(): boolean {
-  return config.tokensaveEnabled();
+  return config.tokensaveEnabled() || Boolean(config.tokensaveAggregateEndpoint());
+}
+
+function currentTokensaveProjectId(): string | undefined {
+  return config.tokensaveAggregateEndpoint() ? projectSlug() : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
 export interface TokensaveDashboardData {
@@ -151,8 +172,24 @@ export interface TokensaveDashboardData {
 /** Single project-root `.tokensave/` index — see "TokenSave index freshness" in vscode/CLAUDE.md. */
 async function loadTokensaveDashboardData(
   tokensaveBinPath: string,
-  range: TokensaveRange
+  range: TokensaveRange,
+  project?: string
 ): Promise<TokensaveDashboardData> {
+  if (tokensaveUseRemote()) {
+    const remote = await getRemoteTokensaveStats(project);
+    if (!remote) return { gain: { saved_tokens: 0, calls: 0, usd: 0 }, history: [] };
+    return {
+      gain: { saved_tokens: remote.summary.saved_tokens, calls: remote.summary.calls, usd: 0 },
+      // Remote aggregate has no `usd` equivalent (see docker/CLAUDE.md's "TokenSave data model") — always 0.
+      history: remote.daily.map((d) => ({
+        day: Math.floor(Date.parse(`${d.date}T00:00:00Z`) / 1000),
+        saved_tokens: d.saved_tokens,
+        calls: d.calls,
+        usd: 0,
+      })),
+    };
+  }
+
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!cwd) return { gain: { saved_tokens: 0, calls: 0, usd: 0 }, history: [] };
 
@@ -234,12 +271,14 @@ function renderDashboardHtml(opts: {
   headroomAvailable: boolean;
   rtkAvailable: boolean;
   tokensaveAvailable: boolean;
+  tokensaveRemote: boolean;
   externalOrigin: string;
   iconUri: string;
   cspSource: string;
   forceTab?: 'settings';
 }): string {
-  const { headroomAvailable, rtkAvailable, tokensaveAvailable, externalOrigin, iconUri, cspSource, forceTab } = opts;
+  const { headroomAvailable, rtkAvailable, tokensaveAvailable, tokensaveRemote, externalOrigin, iconUri, cspSource, forceTab } =
+    opts;
   const nonce = getNonce();
   // CO2 needs Headroom's per-model token breakdown (see extractHeadroomStats), so it rides along
   // with the Headroom tab rather than being its own top-level availability check.
@@ -433,6 +472,8 @@ ${
   tokensaveAvailable
     ? `  <div class="view${showTabs && defaultTab !== 'tokensave' ? ' hidden' : ''}" id="view-tokensave">
     <div class="rtk-toolbar">
+      ${tokensaveRemote ? `<label for="ts-project-select">Project</label>
+      <select id="ts-project-select"><option value="">All projects</option></select>` : ''}
       <label for="ts-range-select">Range</label>
       <select id="ts-range-select">
         <option value="today">Today</option>
@@ -445,6 +486,8 @@ ${
     <div class="cards" id="ts-cards"></div>
     <div class="rtk-section-title">Savings history</div>
     <div class="chart" id="ts-history"></div>
+    ${tokensaveRemote ? `<div class="rtk-section-title hidden" id="ts-projects-title">Projects</div>
+    <table class="hidden" id="ts-projects-table"><thead><tr><th>Project</th><th>Calls</th><th>Saved tokens</th><th>Avg savings %</th></tr></thead><tbody></tbody></table>` : ''}
     <div class="empty hidden" id="ts-index-empty">No code-graph index yet.</div>
     <div class="hidden" id="ts-index-content">
       <div class="rtk-section-title">Index freshness</div>
@@ -508,13 +551,17 @@ ${
   }
 
   const tsRangeSelect = document.getElementById('ts-range-select');
+  const tsProjectSelect = document.getElementById('ts-project-select');
+  let tsProjectsPopulated = false;
   function queryTokensave() {
     vscode.postMessage({
       type: 'tokensave:query',
       range: (tsRangeSelect && tsRangeSelect.value) || '30d',
+      project: (tsProjectSelect && tsProjectSelect.value) || null,
     });
   }
   if (tsRangeSelect) tsRangeSelect.addEventListener('change', queryTokensave);
+  if (tsProjectSelect) tsProjectSelect.addEventListener('change', queryTokensave);
 
   function fmtNum(n) {
     if (n === undefined || n === null) return '–';
@@ -697,6 +744,22 @@ ${
     tableEl.classList.remove('hidden');
     tableEl.querySelector('tbody').innerHTML = projects.map((p) =>
       '<tr><td>' + esc(p.label || p.id_project) + '</td><td>' + fmtNum(p.commands) + '</td><td>' + fmtNum(p.saved_tokens) + '</td><td>' + fmtPct(p.avg_savings_pct) + '</td></tr>'
+    ).join('');
+  }
+
+  function renderTsProjects(projects) {
+    const title = document.getElementById('ts-projects-title');
+    const tableEl = document.getElementById('ts-projects-table');
+    if (!title || !tableEl) return;
+    if (!projects || projects.length === 0) {
+      title.classList.add('hidden');
+      tableEl.classList.add('hidden');
+      return;
+    }
+    title.classList.remove('hidden');
+    tableEl.classList.remove('hidden');
+    tableEl.querySelector('tbody').innerHTML = projects.map((p) =>
+      '<tr><td>' + esc(p.label || p.id_project) + '</td><td>' + fmtNum(p.calls) + '</td><td>' + fmtNum(p.saved_tokens) + '</td><td>' + fmtPct(p.avg_savings_pct) + '</td></tr>'
     ).join('');
   }
 
@@ -944,8 +1007,21 @@ ${
       renderTsCards(msg.gain, msg.status);
       renderTsHistory(msg.history);
       renderTsIndex(msg.status);
+      renderTsProjects(msg.selected ? null : msg.projects);
       const metricEl = document.getElementById('tab-tokensave-metric');
       if (metricEl) metricEl.textContent = fmtNum(msg.gain.saved_tokens) + ' saved';
+      if (tsProjectSelect && !tsProjectsPopulated && msg.projects && msg.projects.length) {
+        msg.projects.forEach((p) => {
+          const opt = document.createElement('option');
+          opt.value = p.id_project;
+          opt.textContent = p.label || p.id_project;
+          tsProjectSelect.appendChild(opt);
+        });
+        tsProjectsPopulated = true;
+      }
+      if (tsProjectSelect) {
+        tsProjectSelect.value = msg.selected || '';
+      }
       return;
     }
     if (msg.type !== 'rtk:data') return;
@@ -982,13 +1058,19 @@ ${
       });
       projectsPopulated = true;
     }
+    // Keep the select in sync with the host's default (current project, not "all") on the
+    // initial rtk:init round trip — depends on msg.projects having populated the matching
+    // option above, so this must run after that block.
+    if (projectSelect) {
+      projectSelect.value = msg.selected || '';
+    }
   });
 
   if (document.getElementById('view-rtk')) {
     vscode.postMessage({ type: 'rtk:init' });
   }
   if (document.getElementById('view-tokensave')) {
-    queryTokensave();
+    vscode.postMessage({ type: 'tokensave:init' });
   }
   vscode.postMessage({ type: 'settings:init' });
 })();
@@ -1001,6 +1083,7 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
   let headroomAvailable = config.headroomEnabled();
   const rtkAvailable = rtkDashboardAvailable();
   const tokensaveAvailable = tokensaveDashboardAvailable();
+  const tokensaveRemote = tokensaveUseRemote();
   const tokensaveBinPath = storagePaths(context).tokensaveBinPath;
   // Unlike the Headroom/RTK/CO2 tabs, Settings is always reachable — it's the only way to turn
   // RTK/Headroom back on from inside the dashboard once nothing else is showing.
@@ -1090,14 +1173,20 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
       field?: string;
     }) => {
       if (msg?.type === 'rtk:init' || msg?.type === 'rtk:selectProject') {
-        const project = msg.type === 'rtk:selectProject' && msg.project ? msg.project : undefined;
+        const project =
+          msg.type === 'rtk:selectProject' ? msg.project || undefined : currentRtkProjectId();
         const [stats, projects] = await Promise.all([getRtkStats(project), getRtkProjects()]);
         void panel.webview.postMessage({ type: 'rtk:data', stats: stats ?? null, projects, selected: project ?? null });
         return;
       }
-      if (msg?.type === 'tokensave:query') {
-        const data = await loadTokensaveDashboardData(tokensaveBinPath, msg.range ?? '30d');
-        void panel.webview.postMessage({ type: 'tokensave:data', ...data });
+      if (msg?.type === 'tokensave:init' || msg?.type === 'tokensave:query') {
+        const project =
+          msg.type === 'tokensave:query' ? msg.project || undefined : currentTokensaveProjectId();
+        const [data, projects] = await Promise.all([
+          loadTokensaveDashboardData(tokensaveBinPath, msg.range ?? '30d', project),
+          tokensaveUseRemote() ? getRemoteTokensaveProjects() : Promise.resolve([]),
+        ]);
+        void panel.webview.postMessage({ type: 'tokensave:data', ...data, projects, selected: project ?? null });
         return;
       }
       if (msg?.type === 'settings:init') {
@@ -1155,6 +1244,7 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
     headroomAvailable,
     rtkAvailable,
     tokensaveAvailable,
+    tokensaveRemote,
     externalOrigin,
     iconUri: iconUri.toString(),
     cspSource: panel.webview.cspSource,

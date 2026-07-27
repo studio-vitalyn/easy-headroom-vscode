@@ -17,6 +17,7 @@ import {
 import { ProxyDaemonManager } from './daemon';
 import { HeadroomStatusBar } from './statusBar';
 import { RtkReportingWatcher } from './rtkReporting';
+import { TokensaveReportingWatcher } from './tokensaveReporting';
 import { registerCommands } from './commands';
 import { formatError } from './errors';
 import { outputChannel, log } from './log';
@@ -24,6 +25,7 @@ import { outputChannel, log } from './log';
 let daemon: ProxyDaemonManager | undefined;
 let statusBar: HeadroomStatusBar | undefined;
 let reportingWatcher: RtkReportingWatcher | undefined;
+let tokensaveReportingWatcher: TokensaveReportingWatcher | undefined;
 let tokensaveSyncTimer: TokensaveSyncTimer | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -104,6 +106,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       tokensaveSyncTimer = new TokensaveSyncTimer(tokensaveBinPath);
       tokensaveSyncTimer.start();
       context.subscriptions.push({ dispose: () => tokensaveSyncTimer?.dispose() });
+
+      if (config.tokensaveIngestEndpoint()) {
+        tokensaveReportingWatcher = new TokensaveReportingWatcher();
+        tokensaveReportingWatcher.start();
+        context.subscriptions.push({ dispose: () => tokensaveReportingWatcher?.dispose() });
+      }
     }
   } catch (err) {
     log(`TokenSave setup failed — ${formatError(err)}`);

@@ -1,4 +1,5 @@
 import { runCapture } from './tokensave';
+import { config } from './config';
 
 export type TokensaveRange = 'today' | '7d' | '30d' | 'month' | 'all';
 
@@ -56,4 +57,72 @@ export function getTokensaveHistory(
 
 export function getTokensaveStatus(tokensaveBinPath: string, cwd: string): Promise<TokensaveStatus | undefined> {
   return runJson(tokensaveBinPath, ['status', '--json'], cwd);
+}
+
+interface TokensaveRemoteSeries {
+  calls: number;
+  before_tokens: number;
+  after_tokens: number;
+  saved_tokens: number;
+  savings_pct: number;
+}
+
+export type TokensaveRemoteDaily = TokensaveRemoteSeries & { date: string };
+export type TokensaveRemoteWeekly = TokensaveRemoteSeries & { week_start: string; week_end: string };
+export type TokensaveRemoteMonthly = TokensaveRemoteSeries & { month: string };
+
+export interface TokensaveRemoteStats {
+  summary: TokensaveRemoteSeries;
+  daily: TokensaveRemoteDaily[];
+  weekly: TokensaveRemoteWeekly[];
+  monthly: TokensaveRemoteMonthly[];
+}
+
+export interface TokensaveProjectSummary {
+  id_project: string;
+  label: string;
+  calls: number;
+  before_tokens: number;
+  after_tokens: number;
+  saved_tokens: number;
+  avg_savings_pct: number;
+}
+
+/**
+ * Same principle as rtkStats.ts's `fetchJson` — attaches the shared proxy token, treats any
+ * failure (network, non-2xx, malformed body) as "no data" rather than throwing.
+ */
+async function fetchJson<T>(url: string): Promise<T | undefined> {
+  const headers: Record<string, string> = {};
+  const proxyToken = config.proxyToken();
+  if (proxyToken) headers['X-Headroom-Proxy-Token'] = proxyToken;
+  try {
+    const res = await fetch(url, { headers });
+    if (!res.ok) return undefined;
+    return (await res.json()) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function getRemoteTokensaveStats(project?: string): Promise<TokensaveRemoteStats | undefined> {
+  const base = config.tokensaveAggregateEndpoint();
+  if (!base) return undefined;
+  const url = project ? `${base}?project=${encodeURIComponent(project)}` : base;
+  return fetchJson<TokensaveRemoteStats>(url);
+}
+
+export async function getRemoteTokensaveProjects(): Promise<TokensaveProjectSummary[]> {
+  const base = config.tokensaveProjectsEndpoint();
+  if (!base) return [];
+  const body = await fetchJson<{
+    projects: Omit<TokensaveProjectSummary, 'label'>[];
+  }>(base);
+  if (!body) return [];
+  return body.projects.map((p) => ({ ...p, label: p.id_project }));
+}
+
+/** TokenSave's remote/aggregator mode, mirroring RTK's `useRemote()` in rtkStats.ts. */
+export function tokensaveUseRemote(): boolean {
+  return Boolean(config.tokensaveAggregateEndpoint());
 }
