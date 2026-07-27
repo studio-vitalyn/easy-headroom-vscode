@@ -225,12 +225,6 @@ function renderDashboardHtml(opts: {
   .view { position: absolute; inset: 0; overflow: auto; }
   .view.hidden { display: none; }
   #view-headroom { display: flex; flex-direction: column; overflow: hidden; }
-  #hr-stats { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--vscode-widget-border); flex: 0 0 auto; }
-  #hr-stats .card { padding: 6px 12px; min-width: 90px; }
-  #hr-stats .value { font-size: 15px; }
-  #hr-stats .spark-card { display: flex; flex-direction: column; justify-content: flex-end; min-width: 80px; }
-  #hr-stats .spark { position: relative; height: 24px; }
-  #hr-stats .spark svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
   iframe { width: 100%; flex: 1; min-height: 0; border: none; display: block; }
   .rtk-toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; }
   select { background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 4px; padding: 2px 6px; }
@@ -324,6 +318,7 @@ ${
   showTabs
     ? `${headroomAvailable ? `  <button class="tab-btn${defaultTab === 'headroom' ? ' active' : ''}" id="tab-headroom" data-tab="headroom">
     <span class="tab-title">Headroom</span>
+    <span class="tab-metric" id="tab-headroom-metric">…</span>
   </button>` : ''}
 ${rtkAvailable ? `  <button class="tab-btn${defaultTab === 'rtk' ? ' active' : ''}" id="tab-rtk" data-tab="rtk">
     <span class="tab-title">RTK</span>
@@ -343,7 +338,6 @@ ${co2Available ? `  <button class="tab-btn${defaultTab === 'co2' ? ' active' : '
 ${
   headroomAvailable
     ? `  <div class="view${showTabs && defaultTab !== 'headroom' ? ' hidden' : ''}" id="view-headroom">
-    <div class="hidden" id="hr-stats"></div>
     <iframe src="${externalOrigin}/dashboard"></iframe>
   </div>`
     : ''
@@ -456,22 +450,9 @@ ${
   }
 
   function renderHeadroomStats(stats) {
-    const el = document.getElementById('hr-stats');
-    if (!el) return;
-    if (!stats) { el.classList.add('hidden'); return; }
-    el.classList.remove('hidden');
-    const cards = [
-      ['Requests', fmtNum(stats.requests)],
-      ['Cost saved', fmtUsd(stats.costSavedUsd)],
-      ['Savings', fmtPct(stats.savingsPct)],
-      ['Cache hit rate', fmtPct(stats.cacheHitRate)],
-      ['Avg latency', fmtNum(stats.avgLatencyMs) + ' ms'],
-    ];
-    const history = stats.history || [];
-    const spark = buildTrendAreaSvg(history, 'hr-spark-grad', '--vscode-charts-blue', 1.25);
-    el.innerHTML = cards.map(([label, value, tooltip]) =>
-      '<div class="card"' + (tooltip ? ' title="' + esc(tooltip) + '"' : '') + '><div class="value">' + esc(value) + '</div><div class="label">' + esc(label) + '</div></div>'
-    ).join('') + (history.length ? '<div class="card spark-card"><div class="spark">' + spark + '</div><div class="label">Recent savings</div></div>' : '');
+    const metricEl = document.getElementById('tab-headroom-metric');
+    if (!metricEl) return;
+    metricEl.textContent = stats ? fmtUsd(stats.costSavedUsd) + ' saved · ' + fmtPct(stats.savingsPct) : '…';
   }
 
   // Builds a filled area-under-line trend chart (gradient fill + a thin stroked line on top),
