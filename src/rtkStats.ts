@@ -114,11 +114,22 @@ const SERIES_COLUMNS = `
  * remote aggregator (see rtkSyncState.ts). Locally, the closest equivalent is `project_path`
  * (RTK's own per-command cwd), grouped/filtered on the raw path, labeled with its basename for
  * a readable picker.
+ *
+ * Filtering by the workspace root's exact path alone misses almost everything: RTK records the
+ * literal cwd of each wrapped command, and a real session runs commands from many subdirectories
+ * (including submodules like docker/, vscode/) that each show up as their own distinct
+ * project_path — none of which equal the root path exactly. So "current project" (the dashboard's
+ * default filter, see currentRtkProjectId() in commands.ts) must match the root path *or* any path
+ * nested under it, the same "whole project, including submodules" scope TokenSave's single
+ * project-root index already uses (see vscode/CLAUDE.md's "TokenSave index freshness").
  */
+function projectPathFilter(projectPath: string): { where: string; params: string[] } {
+  return { where: 'WHERE (project_path = ? OR project_path LIKE ?)', params: [projectPath, `${projectPath}/%`] };
+}
+
 async function getLocalStats(projectPath?: string): Promise<RtkStats | undefined> {
   return withLocalDb((db) => {
-    const where = projectPath ? 'WHERE project_path = ?' : '';
-    const params = projectPath ? [projectPath] : [];
+    const { where, params } = projectPath ? projectPathFilter(projectPath) : { where: '', params: [] };
 
     const summaryRow = queryAll(
       db,
