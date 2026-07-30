@@ -156,6 +156,12 @@ async function writeVersionMarker(file: string, marker: VersionMarker): Promise<
   await fs.writeFile(file, JSON.stringify(marker), 'utf8');
 }
 
+/** For the status bar tooltip — reads the marker written by the last successful install, no venv/pip call. */
+export async function getInstalledHeadroomVersion(context: vscode.ExtensionContext): Promise<string | undefined> {
+  const marker = await readVersionMarker(storagePaths(context).headroomVersionFile);
+  return marker?.installedVersion;
+}
+
 /** Ground truth for "what's actually installed" — the requested spec string isn't proof of the outcome. */
 async function installedHeadroomVersion(venvDir: string): Promise<string | undefined> {
   try {

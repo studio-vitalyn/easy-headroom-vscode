@@ -533,6 +533,48 @@ Both are wired into `activate()` right after the initial
 (`log()`), no popup — same "no popups, ever" treatment as any other
 non-critical setup step (see "Setup guidance" below).
 
+### Version re-check timer — TokenSave/Headroom self-update in a long-lived window
+
+`ensureTokensaveInstalled`/`ensureHeadroomInstalled` each gate their own
+"is a newer release available" check behind a 24h marker file
+(`tokensaveVersionFile`/`headroomVersionFile`, unpinned mode only — see
+"TokenSave install"/"Headroom install" above), but both were previously
+only ever *invoked* once, at `activate()`. A window left open for
+several days (no reload) would silently sit on a stale binary
+indefinitely — the 24h gate was never actually revisited, since nothing
+re-called those functions after activation. `UpdateCheckTimer`
+(`updateCheck.ts`) is the fix: a simple hourly `setInterval` (same
+`start()`/`dispose()` convention as `TokensaveSyncTimer`) that just
+re-calls `ensureTokensaveInstalled` and, when `headroom.enabled` and
+`mode === 'local'`, `ensureHeadroomInstalled` again. Ticking hourly
+rather than daily is deliberate slack, not a tighter check interval —
+each `ensure*` call still only actually hits GitHub/PyPI once its own
+24h marker has elapsed, so nearly every tick is a no-op marker-file
+read.
+
+- On a TokenSave upgrade, `ensureTokensaveMcpInstalled` re-runs
+  afterward (same "safe to re-run every time" reasoning as at
+  activation — see "MCP server registration" below).
+- On a Headroom upgrade (`headroom.updated === true`),
+  `ensureHeadroomWrapped` + `ensureHeadroomMcpInstalled` re-run, and the
+  shared proxy daemon is restarted (`daemon.ensureRunning(binPath, {
+  forceRestart: true })`) so the new venv actually takes effect instead
+  of the old process lingering — mirrors exactly what `activate()`
+  itself already does when `ensureHeadroomInstalled` reports `updated`.
+  `runHeadroomLearn` also re-runs on upgrade, gated the same way as at
+  activation (`rtk.enabled` + an RTK binary present).
+- RTK is deliberately not included in this timer — its own install
+  always re-resolves "latest" via a stable, rate-limit-safe redirect
+  URL on every activation already (see "RTK install — static binary"),
+  so it has no marker-file gate to revisit periodically.
+- After each tick, the status bar is refreshed (`onChange` callback
+  passed in from `extension.ts`) so a version bump or newly-broken
+  TokenSave indexing state is reflected without waiting for the status
+  bar's own independent 30s poll.
+- Constructed and started in `extension.ts` right after `statusBar`
+  itself, disposed via `context.subscriptions` like every other timer
+  in this file.
+
 ### Wrap/init idempotency
 
 Before calling `rtk init --global --auto-patch[...]` for a given agent, check
@@ -641,12 +683,14 @@ would both try to bind the same port and collide.
 - **Health color, click → settings instead of dashboard when broken**:
   deliberately avoids a popup for this (see "Setup guidance" below) —
   instead `HeadroomStatusBar.isBroken()` (`statusBar.ts`) flags the item
-  as broken when either independent layer can't function, still keeping
-  RTK/Headroom distinguishable in the tooltip rather than collapsing
-  them into one generic message (see the "two independent layers"
-  guiding principle):
+  as broken when any independent layer can't function, still keeping
+  RTK/Headroom/TokenSave distinguishable in the tooltip rather than
+  collapsing them into one generic message (see the "two independent
+  layers" guiding principle):
   - RTK: `ensureRtkInitialized`'s failures (`rtk.ts`), passed into
     `HeadroomStatusBar`'s constructor at activation.
+  - TokenSave: `ensureTokensaveIndexed`'s failures (`tokensave.ts`),
+    passed into `HeadroomStatusBar`'s constructor the same way as RTK's.
   - Headroom: `computeState()`'s `not-initialized` (config genuinely
     missing — e.g. `mode=remote` with empty `remoteUrl`, the only case
     where `!base`) or `error` (health check fails though configured —
@@ -654,23 +698,56 @@ would both try to bind the same port and collide.
     by the time `refresh()` runs, not "still starting up" — `ensureRunning`
     already attempted a spawn once during `activate()` before the status
     bar's own polling begins.
-  - `item.color = new vscode.ThemeColor(broken ? 'charts.red' : 'charts.green')`
-    — unlike `backgroundColor` (restricted by VS Code to
-    `statusBarItem.errorBackground`/`warningBackground` only, anything
-    else silently ignored), the `color` property accepts any
-    `ThemeColor`/string, so the icon itself goes green/red rather than
-    sitting on a colored pill. The click target itself doesn't change
-    with broken state (see below) — both Dashboard and Settings are
-    always one click away either way, so there's no need to switch the
-    command based on state.
+  - Broken state uses `item.backgroundColor = new
+    vscode.ThemeColor('statusBarItem.errorBackground')` +
+    `item.color = new vscode.ThemeColor('statusBarItem.errorForeground')`
+    (a red pill + white icon), not just a recolored icon on the default
+    background — confirmed the icon-only recolor (`charts.red`) wasn't
+    actually noticeable in practice against the default status bar
+    background, hence the pill. `backgroundColor` is restricted by VS
+    Code to exactly `statusBarItem.errorBackground`/`warningBackground`
+    (any other `ThemeColor` is silently ignored), so red/white is the
+    only broken-state combination available this way; the OK state
+    keeps the plain recolored icon (`charts.green`, no background) since
+    that state doesn't need to grab attention. The click target itself
+    doesn't change with broken state (see below) — both Dashboard and
+    Settings are always one click away either way, so there's no need to
+    switch the command based on state.
 - **Content** (VS Code status bar items can't render real
   charts/canvas — text + Codicons only):
   - Bar text: compact numeric summary (e.g. tokens/€ saved), optionally
     followed by a Unicode block sparkline (▁▂▃▄▅▆▇█) built from recent
     savings data points — cheap inline "mini graph", no dependencies.
-  - Tooltip (`MarkdownString`): richer breakdown on hover — e.g. RTK
-    vs Headroom split, today vs all-time — still no real chart, just
+  - Tooltip (`MarkdownString`): richer breakdown on hover — RTK,
+    Headroom, and TokenSave each get their own enabled/disabled line
+    (plus a failure summary when broken) — still no real chart, just
     markdown text/table.
+  - **Version numbers, one per tool**: RTK's line reads straight off
+    the binary (`rtk --version`, parsed via `readRtkVersion` in
+    `statusBar.ts`) since it has no version-marker file (see "RTK
+    install" above — it always re-resolves "latest" on activation, so
+    there's nothing else to read); TokenSave's comes from
+    `getInstalledTokensaveVersion` (`tokensave.ts`), reading the same
+    marker file `ensureTokensaveInstalled` already writes, no extra
+    process spawn. All version strings are passed through `stripV()`
+    before display — TokenSave's marker stores the raw GitHub release
+    tag (`v7.8.1`), so formatting it as `v${version}` unstripped
+    doubles up into `vv7.8.1` (a real regression, caught from a
+    screenshot). **Headroom shows local vs. remote as *versions*, not
+    a URL** — local mode shows the installed venv version
+    (`getInstalledHeadroomVersion`, `headroom.ts`, same marker-file
+    read as TokenSave's); remote mode shows the *remote instance's own*
+    running version, fetched via `fetchRemoteHeadroomVersion`
+    (`daemon.ts` — `/health`'s JSON body carries a `version` field,
+    confirmed against a real `headroom proxy`), falling back to
+    "(not set)" when `remoteUrl` is empty or "(unreachable)" when the
+    fetch fails — the point is to catch a forgotten/stale remote at a
+    glance, which a bare URL string doesn't do (a URL can be present
+    and still point at nothing running, or at a version far behind the
+    local one). All version reads happen on every `refresh()` tick
+    (30s poll, plus after every `UpdateCheckTimer` tick) — cheap enough
+    (one spawn, two marker-file reads, one extra `/health` fetch in
+    remote mode only) not to need caching.
   - The dashboard's own charts are **not** reimplemented in the status
     bar — that's what Headroom's own `/dashboard` is for, opened in an
     embedded VS Code tab on click (see below). No chart-drawing code

@@ -73,6 +73,12 @@ async function writeVersionMarker(file: string, marker: VersionMarker): Promise<
   await fs.writeFile(file, JSON.stringify(marker), 'utf8');
 }
 
+/** For the status bar tooltip — reads the marker written by the last successful install. */
+export async function getInstalledTokensaveVersion(context: vscode.ExtensionContext): Promise<string | undefined> {
+  const marker = await readVersionMarker(storagePaths(context).tokensaveVersionFile);
+  return marker?.installedVersion;
+}
+
 async function installVersion(paths: ReturnType<typeof storagePaths>, version: string): Promise<void> {
   const asset = assetName(version);
   if (!asset) {

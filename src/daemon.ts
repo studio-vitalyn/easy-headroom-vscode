@@ -37,6 +37,29 @@ export async function checkHealth(baseUrl: string): Promise<boolean> {
   }
 }
 
+/**
+ * For the status bar tooltip's remote-mode Headroom line — `/health`'s own JSON body carries a
+ * `version` field (confirmed against a real `headroom proxy` instance), so no separate endpoint
+ * is needed. Independent request from `checkHealth` (called separately, only in remote mode)
+ * rather than threading a return-value change through `checkHealth`'s other callers.
+ */
+export async function fetchRemoteHeadroomVersion(baseUrl: string): Promise<string | undefined> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/$/, '')}/health`, { signal: controller.signal });
+      if (!res.ok) return undefined;
+      const body = (await res.json()) as { version?: string };
+      return body.version;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 function killPid(pid: number): void {
   try {
     process.kill(pid);

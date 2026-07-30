@@ -13,11 +13,13 @@ import {
   ensureTokensaveIndexed,
   installTokensaveGitHooks,
   TokensaveSyncTimer,
+  TokensaveIndexFailure,
 } from './tokensave';
 import { ProxyDaemonManager } from './daemon';
 import { HeadroomStatusBar } from './statusBar';
 import { RtkReportingWatcher } from './rtkReporting';
 import { TokensaveReportingWatcher } from './tokensaveReporting';
+import { UpdateCheckTimer } from './updateCheck';
 import { registerCommands } from './commands';
 import { formatError } from './errors';
 import { outputChannel, log } from './log';
@@ -27,6 +29,7 @@ let statusBar: HeadroomStatusBar | undefined;
 let reportingWatcher: RtkReportingWatcher | undefined;
 let tokensaveReportingWatcher: TokensaveReportingWatcher | undefined;
 let tokensaveSyncTimer: TokensaveSyncTimer | undefined;
+let updateCheckTimer: UpdateCheckTimer | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   context.subscriptions.push(outputChannel);
@@ -85,14 +88,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }
 
+  let tokensaveIndexFailures: TokensaveIndexFailure[] = [];
+  let tokensaveBinPath: string | undefined;
   try {
-    const tokensaveBinPath = await ensureTokensaveInstalled(context);
+    tokensaveBinPath = await ensureTokensaveInstalled(context);
     log(tokensaveBinPath ? `TokenSave ready at ${tokensaveBinPath}` : 'TokenSave disabled (easy-headroom.tokensave.enabled = false)');
     if (tokensaveBinPath) {
       await ensureTokensaveMcpInstalled(tokensaveBinPath);
-      const indexFailures = await ensureTokensaveIndexed(tokensaveBinPath);
-      if (indexFailures.length > 0) {
-        const list = indexFailures.map((f) => `${f.folder} (${formatError(f.error)})`).join(', ');
+      tokensaveIndexFailures = await ensureTokensaveIndexed(tokensaveBinPath);
+      if (tokensaveIndexFailures.length > 0) {
+        const list = tokensaveIndexFailures.map((f) => `${f.folder} (${formatError(f.error)})`).join(', ');
         log(`TokenSave indexing failed for: ${list}`);
         void vscode.window.showWarningMessage(`easy-headroom: TokenSave indexing failed for: ${list}`);
       }
@@ -121,9 +126,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await daemon.applyEnvironment();
   daemon.startLifecycleTimers();
 
-  statusBar = new HeadroomStatusBar(rtkBinPath, rtkFailures, context.extension.packageJSON.version);
+  statusBar = new HeadroomStatusBar(
+    context,
+    rtkBinPath,
+    rtkFailures,
+    context.extension.packageJSON.version,
+    tokensaveIndexFailures,
+    tokensaveBinPath
+  );
   statusBar.start();
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
+
+  updateCheckTimer = new UpdateCheckTimer(context, daemon, rtkBinPath, () => void statusBar?.refresh());
+  updateCheckTimer.start();
+  context.subscriptions.push({ dispose: () => updateCheckTimer?.dispose() });
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
