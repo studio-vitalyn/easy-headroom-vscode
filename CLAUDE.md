@@ -960,31 +960,44 @@ same. The two former inline cards on the Headroom tab were removed in
 favor of this tab — not duplicated — to avoid maintaining the same
 numbers in two places.
 
-- **RTK's savings are allocated across models, not shown separately**:
-  RTK has zero per-model attribution (see above), but its aggregate
-  `saved` tokens dwarf Headroom's own — showing only Headroom's figure
-  understated the real savings. `renderCo2(carbon, rtkTotalSaved)`
-  (inline webview script) allocates RTK's model-agnostic saved-token
-  pool across models using each model's *share of Headroom's sent
-  tokens* as a proxy distribution, then applies that same model's
-  `sentGrams / sentTokens` coefficient (backed out client-side — no
-  new backend payload) to convert the allocated share to grams
-  (`perModelRtkAvoided`, one entry per `carbon.perModel` row). This
-  is a proxy on top of a proxy — RTK's usage mix may not actually match
-  Headroom's — so it renders as its own column in the per-model table
-  ("CO₂ avoided (RTK, est.)", `--vscode-charts-purple`, showing "–"
-  per row when not yet computable), its own third headline row, and
-  its own legend swatch — never merged into the green Headroom
-  figures. Only computed when both `rtkTotalSaved > 0` and Headroom
-  has sent tokens to build a distribution from; otherwise the
-  headline/legend fall back to 2 rows/swatches (same as before this
-  feature) and the table column reads "–" throughout. The tab-bar
-  metric (`tab-co2-metric`) sums Headroom's and RTK's avoided grams
-  into one combined figure. A dedicated italic disclaimer paragraph
-  (`#co2-calc-disclaimer`, below the table, empty until RTK data
-  allocable) spells out the extra approximation layer — kept out of
-  the top intro paragraph so it only appears once the RTK figures
-  are actually showing.
+- **RTK's and TokenSave's savings are each allocated across models, not
+  shown separately**: neither has per-model attribution (see above —
+  RTK's schema has no model column; TokenSave's `gain`/`history` are
+  similarly model-agnostic), but their aggregate `saved` tokens can
+  dwarf Headroom's own — showing only Headroom's figure understated the
+  real savings. `renderCo2(carbon, rtkTotalSaved, tokensaveTotalSaved)`
+  (inline webview script) allocates each pool's model-agnostic
+  saved-token total across models using each model's *share of
+  Headroom's sent tokens* as a proxy distribution (a shared `allocate()`
+  helper, called once per source), then applies that same model's
+  `sentGrams / sentTokens` coefficient (backed out client-side — no new
+  backend payload) to convert the allocated share to grams
+  (`perModelRtkAvoided`/`perModelTokensaveAvoided`, one entry per
+  `carbon.perModel` row). This is a proxy on top of a proxy — RTK's/
+  TokenSave's usage mix may not actually match Headroom's — so each
+  renders as its own column in the per-model table ("CO₂ avoided (RTK,
+  est.)" `--vscode-charts-purple`, "CO₂ avoided (TokenSave, est.)"
+  `--vscode-charts-orange`, showing "–" per row when not yet
+  computable), its own headline row, and its own legend swatch — never
+  merged into the green Headroom figures or into each other. Each is
+  only computed when its own `*TotalSaved > 0` and Headroom has sent
+  tokens to build a distribution from; otherwise that source's
+  headline/legend row is omitted and its table column reads "–"
+  throughout — independent per source, so e.g. RTK disabled and
+  TokenSave enabled still shows the TokenSave column alone. The tab-bar
+  metric (`tab-co2-metric`) sums Headroom's, RTK's, and TokenSave's
+  avoided grams into one combined figure. A dedicated italic disclaimer
+  paragraph (`#co2-calc-disclaimer`, below the table, empty until at
+  least one of RTK/TokenSave is allocable, naming whichever of the two
+  actually contributed) spells out the extra approximation layer — kept
+  out of the top intro paragraph so it only appears once at least one
+  of those figures is actually showing.
+  `latestTokensaveSaved` is populated from the same `tokensave:data`
+  message (`msg.gain.saved_tokens`) the TokenSave tab itself renders
+  from — no new request, same "no new backend payload" property as
+  RTK's own wiring — and re-triggers `renderCo2()` on every
+  `headroom:stats`/`rtk:data`/`tokensave:data` message, same as
+  `latestRtkSaved`.
 
 - **Data source, no new request**: `computeCarbonEstimate()`
   (`carbonFootprint.ts`) is fed `persistent_savings.by_model` from the
@@ -1017,7 +1030,7 @@ numbers in two places.
   slugs, not an invented number.
 - **Framing matters here**: the tab's intro paragraph states up front
   that this is an indicative, non-official estimate (and, since the
-  RTK-allocation feature, that the RTK figure is a further
+  RTK-/TokenSave-allocation feature, that those figures are a further
   approximation layered on top). Neither Anthropic nor Headroom
   publish a per-token carbon figure — don't let any future copy on
   this tab imply otherwise.

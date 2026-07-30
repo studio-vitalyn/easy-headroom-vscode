@@ -514,7 +514,7 @@ ${
       <div class="co2-legend" id="co2-legend"></div>
       <div class="co2-headline" id="co2-headline"></div>
       <div class="rtk-section-title">By model</div>
-      <table id="co2-table"><thead><tr><th>Model</th><th>Confidence</th><th>CO₂ sent</th><th>CO₂ avoided (Headroom)</th><th>CO₂ avoided (RTK, est.)</th></tr></thead><tbody></tbody></table>
+      <table id="co2-table"><thead><tr><th>Model</th><th>Confidence</th><th>CO₂ sent</th><th>CO₂ avoided (Headroom)</th><th>CO₂ avoided (RTK, est.)</th><th>CO₂ avoided (TokenSave, est.)</th></tr></thead><tbody></tbody></table>
       <p class="co2-calc-disclaimer" id="co2-calc-disclaimer"></p>
     </div>
   </div>`
@@ -541,6 +541,7 @@ ${
   // combine them — see renderCo2().
   let latestCarbon = null;
   let latestRtkSaved;
+  let latestTokensaveSaved;
   // Set from each settings:data push — lets the scope picker label "User" as "User (Remote)"
   // when running in a Remote-SSH/WSL/container window, matching what native Settings calls it.
   let remoteName;
@@ -626,7 +627,7 @@ ${
       + '</svg>';
   }
 
-  function renderCo2(carbon, rtkTotalSaved) {
+  function renderCo2(carbon, rtkTotalSaved, tokensaveTotalSaved) {
     const empty = document.getElementById('co2-empty');
     const content = document.getElementById('co2-content');
     if (!empty || !content) return;
@@ -638,19 +639,22 @@ ${
     empty.classList.add('hidden');
     content.classList.remove('hidden');
 
-    // RTK has no per-model attribution (see carbonFootprint.ts): its saved-token total is
-    // allocated across models using Headroom's own sent-token mix as the best available proxy,
-    // backing out each model's g/token coefficient from its existing sent totals.
+    // Neither RTK nor TokenSave have per-model attribution (see carbonFootprint.ts): each
+    // saved-token total is allocated across models using Headroom's own sent-token mix as the
+    // best available proxy, backing out each model's g/token coefficient from its sent totals.
     const totalSentTokens = carbon.perModel.reduce((sum, m) => sum + m.sentTokens, 0);
-    const perModelRtkAvoided = (rtkTotalSaved > 0 && totalSentTokens > 0)
+    const allocate = (totalSaved) => (totalSaved > 0 && totalSentTokens > 0)
       ? carbon.perModel.map((m) => {
           if (!m.sentTokens) return 0;
           const coeffGramsPerToken = m.sentGrams / m.sentTokens;
           const weight = m.sentTokens / totalSentTokens;
-          return rtkTotalSaved * weight * coeffGramsPerToken;
+          return totalSaved * weight * coeffGramsPerToken;
         })
       : null;
+    const perModelRtkAvoided = allocate(rtkTotalSaved);
     const rtkAvoidedGrams = perModelRtkAvoided ? perModelRtkAvoided.reduce((a, b) => a + b, 0) : undefined;
+    const perModelTokensaveAvoided = allocate(tokensaveTotalSaved);
+    const tokensaveAvoidedGrams = perModelTokensaveAvoided ? perModelTokensaveAvoided.reduce((a, b) => a + b, 0) : undefined;
 
     const legendEl = document.getElementById('co2-legend');
     if (legendEl) {
@@ -658,19 +662,21 @@ ${
         '<span class="legend-item"><span class="legend-swatch" style="background: var(' + colorVar + ')"></span>' + esc(label) + '</span>';
       legendEl.innerHTML = legendItem('--vscode-charts-blue', 'CO₂ sent')
         + legendItem('--vscode-charts-green', 'CO₂ avoided (Headroom)')
-        + (rtkAvoidedGrams !== undefined ? legendItem('--vscode-charts-purple', 'CO₂ avoided (RTK, est.)') : '');
+        + (rtkAvoidedGrams !== undefined ? legendItem('--vscode-charts-purple', 'CO₂ avoided (RTK, est.)') : '')
+        + (tokensaveAvoidedGrams !== undefined ? legendItem('--vscode-charts-orange', 'CO₂ avoided (TokenSave, est.)') : '');
     }
 
     const headlineEl = document.getElementById('co2-headline');
     if (headlineEl) {
-      const maxHeadline = Math.max(1, carbon.totalSentGrams, carbon.totalAvoidedGrams, rtkAvoidedGrams || 0);
+      const maxHeadline = Math.max(1, carbon.totalSentGrams, carbon.totalAvoidedGrams, rtkAvoidedGrams || 0, tokensaveAvoidedGrams || 0);
       const headlineRow = (label, grams, colorVar) =>
         '<div class="co2-headline-row"><div class="co2-headline-label">' + esc(label) + '</div>'
         + '<div class="co2-headline-track"><div class="co2-headline-fill" style="width: ' + Math.max(2, (grams / maxHeadline) * 100) + '%; background: var(' + colorVar + ')"></div></div>'
         + '<div class="co2-headline-value">' + esc(fmtGrams(grams)) + '</div></div>';
       headlineEl.innerHTML = headlineRow('Sent', carbon.totalSentGrams, '--vscode-charts-blue')
         + headlineRow('Avoided', carbon.totalAvoidedGrams, '--vscode-charts-green')
-        + (rtkAvoidedGrams !== undefined ? headlineRow('Avoided (RTK, est.)', rtkAvoidedGrams, '--vscode-charts-purple') : '');
+        + (rtkAvoidedGrams !== undefined ? headlineRow('Avoided (RTK, est.)', rtkAvoidedGrams, '--vscode-charts-purple') : '')
+        + (tokensaveAvoidedGrams !== undefined ? headlineRow('Avoided (TokenSave, est.)', tokensaveAvoidedGrams, '--vscode-charts-orange') : '');
     }
 
     const tbody = document.querySelector('#co2-table tbody');
@@ -678,6 +684,7 @@ ${
       const maxSent = Math.max(1, ...carbon.perModel.map((m) => m.sentGrams));
       const maxAvoided = Math.max(1, ...carbon.perModel.map((m) => m.avoidedGrams));
       const maxRtkAvoided = Math.max(1, ...(perModelRtkAvoided || [0]));
+      const maxTokensaveAvoided = Math.max(1, ...(perModelTokensaveAvoided || [0]));
       const barCell = (grams, max, colorVar) =>
         '<td><div class="co2-cell-bar"><div class="co2-cell-track"><div class="co2-cell-fill" style="width: '
         + (grams == null ? 0 : Math.max(2, (grams / max) * 100)) + '%; background: var(' + colorVar + ')"></div></div><span>' + esc(fmtGrams(grams)) + '</span></div></td>';
@@ -688,17 +695,21 @@ ${
           : '';
         return '<tr' + matchTitle + '><td>' + esc(m.model) + '</td><td><span' + confClass + '>' + esc(m.confidence) + '</span></td>'
           + barCell(m.sentGrams, maxSent, '--vscode-charts-blue') + barCell(m.avoidedGrams, maxAvoided, '--vscode-charts-green')
-          + barCell(perModelRtkAvoided ? perModelRtkAvoided[i] : null, maxRtkAvoided, '--vscode-charts-purple') + '</tr>';
+          + barCell(perModelRtkAvoided ? perModelRtkAvoided[i] : null, maxRtkAvoided, '--vscode-charts-purple')
+          + barCell(perModelTokensaveAvoided ? perModelTokensaveAvoided[i] : null, maxTokensaveAvoided, '--vscode-charts-orange') + '</tr>';
       }).join('');
     }
 
     const metricEl = document.getElementById('tab-co2-metric');
-    if (metricEl) metricEl.textContent = fmtGramsShort(carbon.totalAvoidedGrams + (rtkAvoidedGrams || 0)) + ' avoided';
+    if (metricEl) metricEl.textContent = fmtGramsShort(carbon.totalAvoidedGrams + (rtkAvoidedGrams || 0) + (tokensaveAvoidedGrams || 0)) + ' avoided';
 
     const disclaimerEl = document.getElementById('co2-calc-disclaimer');
     if (disclaimerEl) {
-      disclaimerEl.textContent = perModelRtkAvoided
-        ? 'RTK\\'s own savings aren\\'t attributed to a model, so its CO₂ avoided (RTK, est.) figure is allocated across models using Headroom\\'s sent-token mix as a proxy — an extra layer of approximation on top of the Headroom figures above.'
+      const sources = [];
+      if (perModelRtkAvoided) sources.push('RTK');
+      if (perModelTokensaveAvoided) sources.push('TokenSave');
+      disclaimerEl.textContent = sources.length
+        ? sources.join(' and ') + '\\'s own savings aren\\'t attributed to a model, so ' + (sources.length > 1 ? 'their' : 'its') + ' CO₂ avoided (est.) figures are allocated across models using Headroom\\'s sent-token mix as a proxy — an extra layer of approximation on top of the Headroom figures above.'
         : '';
     }
   }
@@ -1000,7 +1011,7 @@ ${
     if (msg.type === 'headroom:stats') {
       renderHeadroomStats(msg.stats);
       latestCarbon = (msg.stats && msg.stats.carbon) || null;
-      renderCo2(latestCarbon, latestRtkSaved);
+      renderCo2(latestCarbon, latestRtkSaved, latestTokensaveSaved);
       return;
     }
     if (msg.type === 'tokensave:data') {
@@ -1010,6 +1021,11 @@ ${
       renderTsProjects(msg.selected ? null : msg.projects);
       const metricEl = document.getElementById('tab-tokensave-metric');
       if (metricEl) metricEl.textContent = fmtNum(msg.gain.saved_tokens) + ' saved';
+      // TokenSave has no per-model attribution either (see carbonFootprint.ts), same treatment
+      // as RTK's own saved-token pool below — fed into the CO2 tab as an unattributed pool that
+      // renderCo2() allocates across models using Headroom's sent-token mix as the best proxy.
+      latestTokensaveSaved = msg.gain ? msg.gain.saved_tokens : undefined;
+      renderCo2(latestCarbon, latestRtkSaved, latestTokensaveSaved);
       if (tsProjectSelect && !tsProjectsPopulated && msg.projects && msg.projects.length) {
         msg.projects.forEach((p) => {
           const opt = document.createElement('option');
@@ -1048,7 +1064,7 @@ ${
       // using Headroom's own sent-token mix as the best available proxy.
       latestRtkSaved = msg.stats.summary ? msg.stats.summary.total_saved : undefined;
     }
-    renderCo2(latestCarbon, latestRtkSaved);
+    renderCo2(latestCarbon, latestRtkSaved, latestTokensaveSaved);
     if (projectSelect && !projectsPopulated && msg.projects && msg.projects.length) {
       msg.projects.forEach((p) => {
         const opt = document.createElement('option');
