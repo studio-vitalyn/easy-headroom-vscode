@@ -2,21 +2,25 @@
 
 ![easyHeadroom](https://raw.githubusercontent.com/studio-vitalyn/easy-headroom-vscode/main/assets/splash.png)
 
-Stop hand-rolling your `rtk init` and `headroom wrap claude` setup.
+Stop hand-rolling your `rtk init`, `headroom wrap claude`, and
+`tokensave init` setup.
 **easyHeadroom** is a VS Code extension that installs and configures
-[RTK](https://github.com/rtk-ai/rtk) and
-[Headroom](https://github.com/headroomlabs-ai/headroom) for you, so
-your CLI coding agent burns far fewer tokens on every shell command
-and API call.
+[RTK](https://github.com/rtk-ai/rtk),
+[Headroom](https://github.com/headroomlabs-ai/headroom), and
+[TokenSave](https://github.com/aovestdipaperino/tokensave) for you, so
+your CLI coding agent burns far fewer tokens on every shell command,
+API call, and codebase-exploration query.
 
 ## What it does
 
-- **Installs RTK and/or Headroom** automatically — no manual binary
-  download, no PATH wrangling.
+- **Installs RTK, Headroom, and/or TokenSave** automatically — no
+  manual binary download, no PATH wrangling.
 - **RTK works across agents** — Claude Code, Gemini CLI, and Codex
   CLI, pick which ones via `easy-headroom.rtk.agents`. Headroom (the
   API proxy) is Claude-Code-only, since it works by pointing
-  `ANTHROPIC_BASE_URL` at itself.
+  `ANTHROPIC_BASE_URL` at itself. TokenSave registers itself as an MCP
+  server and indexes every open workspace folder, so code-graph
+  lookups replace token-hungry grep/Explore-agent searches.
 - **Wires up the hooks** (`rtk init --global --auto-patch`, `headroom wrap claude`)
   safely — won't re-patch your config on every restart.
 - **Works on one host or several.** Use it standalone on your laptop, or
@@ -49,6 +53,8 @@ code --install-extension Vitalyn.easy-headroom
      (`claude` by default; add `gemini`/`codex` as needed).
    - `easy-headroom.headroom.enabled` — API compression, caching, and
      output shaping (Claude Code only).
+   - `easy-headroom.tokensave.enabled` — code-graph MCP server for
+     token-efficient code research (on by default).
 3. If you enable Headroom, choose a mode:
    - **local** — the extension runs the proxy for you, right on your
      machine. Nothing else to set up.
@@ -66,13 +72,14 @@ shared dashboard.
 
 ## Why this exists
 
-I was tired of installing and wiring up RTK and Headroom by hand on
-every project, and on every container/host I worked on — `rtk init
---global`, `headroom wrap claude`, PATH management, env vars, repeated
-every single time. Both are excellent, independent tools, but
-neither ships a one-click setup, and neither is designed for a Headroom
-instance shared across multiple machines. This extension automates the
-former and enables the latter, so I stop doing this by hand.
+I was tired of installing and wiring up RTK, Headroom, and TokenSave by
+hand on every project, and on every container/host I worked on — `rtk
+init --global`, `headroom wrap claude`, `tokensave init`, PATH
+management, env vars, repeated every single time. All three are
+excellent, independent tools, but none ships a one-click setup, and
+none is designed for a Headroom instance shared across multiple
+machines. This extension automates the former and enables the latter,
+so I stop doing this by hand.
 
 ## Sponsor
 
