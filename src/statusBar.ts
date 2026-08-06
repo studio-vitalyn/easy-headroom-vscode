@@ -39,7 +39,7 @@ async function readRtkGain(rtkBinPath: string | undefined): Promise<RtkGainSumma
   if (!rtkBinPath) return undefined;
   try {
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(rtkBinPath, ['gain', '--format', 'json']);
+      const child = spawn(rtkBinPath, ['gain', '--format', 'json'], { windowsHide: true });
       let out = '';
       child.stdout.on('data', (d) => (out += d.toString()));
       child.on('error', reject);
@@ -63,7 +63,7 @@ async function readRtkVersion(rtkBinPath: string | undefined): Promise<string | 
   }
   try {
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(rtkBinPath, ['--version']);
+      const child = spawn(rtkBinPath, ['--version'], { windowsHide: true });
       let out = '';
       let err = '';
       child.stdout.on('data', (d) => (out += d.toString()));

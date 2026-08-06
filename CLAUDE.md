@@ -1205,6 +1205,28 @@ case — it drives several requirements above:
   `127.0.0.1` binding both work transparently through Remote-SSH's
   port/URI forwarding — no special-casing needed there.
 
+### Windows considerations
+
+- **Every `spawn` must pass `windowsHide: true`** — no exceptions, and
+  this includes any new call site. Without it, libuv doesn't set
+  `CREATE_NO_WINDOW` and each child gets a visible console window on
+  the user's desktop. This is not cosmetic: the status bar's 30s poll
+  spawns `rtk gain` + `rtk --version` on every tick, so a missing flag
+  there means two console windows flashing every 30 seconds, forever
+  (the extension's first GitHub issue, reported on Windows). The
+  daemon's own spawn in `daemon.ts` is already `detached: true` (which
+  implies `DETACHED_PROCESS`, so no console either way) but passes the
+  flag too, so the rule stays "always", with no per-call-site
+  reasoning to get wrong later.
+- **A multi-word interpreter string is not a `spawn` binary.**
+  `findPythonInterpreter` can return `"py -3"` (the Windows Python
+  Launcher), which every consumer must run through `splitInterpreter()`
+  before spawning — passing the whole string as `bin` looks for an
+  executable literally named `py -3` and always fails. That bug
+  silently disqualified the launcher from detection until 0.4.1,
+  falling through to a bare `python` (possibly the Microsoft Store
+  stub the launcher exists to avoid).
+
 ### `contributes.commands` and activation
 
 - `activationEvents`: `onStartupFinished` — activates once VS Code has

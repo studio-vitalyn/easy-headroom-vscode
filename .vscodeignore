@@ -8,5 +8,6 @@ tsconfig.json
 CLAUDE.md
 .env
 .tokensave/**
+.github/**
 **/*.map
 **/*.har

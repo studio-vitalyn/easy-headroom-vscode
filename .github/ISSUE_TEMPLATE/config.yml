@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Docker bundle (shared instance)
+    url: https://github.com/studio-vitalyn/easy-headroom-docker/issues
+    about: Issues about the self-hosted docker-easy-headroom bundle belong there.
+  - name: RTK
+    url: https://github.com/rtk-ai/rtk/issues
+    about: Bugs in RTK itself (wrong/garbled command output) are upstream.
+  - name: Headroom
+    url: https://github.com/headroomlabs-ai/headroom/issues
+    about: Bugs in the Headroom proxy/dashboard itself are upstream.
+  - name: TokenSave
+    url: https://github.com/aovestdipaperino/tokensave/issues
+    about: Bugs in the TokenSave binary/MCP server itself are upstream.

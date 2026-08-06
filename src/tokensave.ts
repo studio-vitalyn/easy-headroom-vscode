@@ -165,7 +165,7 @@ export async function ensureTokensaveInstalled(context: vscode.ExtensionContext)
 
 export function runCapture(bin: string, args: string[], cwd?: string): Promise<{ stdout: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd });
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, windowsHide: true });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d.toString()));

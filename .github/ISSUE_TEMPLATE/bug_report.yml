@@ -1,0 +1,138 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please fill in as much as you can — the environment
+        fields below are what make a bug reproducible.
+        感谢反馈！请尽量填写以下信息，特别是环境相关的字段。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead. Screenshots/GIFs welcome.
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open VS Code on ...
+        2. Wait for the extension to activate
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: extension-version
+    attributes:
+      label: Extension version
+      description: Extensions view → easy-headroom, or the version shown in the dashboard tab bar.
+      placeholder: '0.4.0'
+    validations:
+      required: true
+
+  - type: input
+    id: vscode-version
+    attributes:
+      label: VS Code version
+      description: Help → About (Windows/Linux) or Code → About (macOS). Paste the version line.
+      placeholder: '1.99.0'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: Under Remote-SSH/WSL/containers, pick the OS of the **remote host** — that's where the extension runs.
+      options:
+        - Windows
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x64)
+        - Linux (arm64)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: 'Windows 11 23H2 / Ubuntu 24.04 / macOS 15.3'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: remote
+    attributes:
+      label: Where is the workspace?
+      description: This extension runs on the workspace side (`extensionKind: workspace`).
+      options:
+        - Local
+        - Remote - SSH
+        - WSL
+        - Dev Container / Docker
+        - GitHub Codespaces
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: '`easy-headroom.mode`'
+      options:
+        - local
+        - remote
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: layers
+    attributes:
+      label: Which layers are enabled?
+      description: The three layers are independent — knowing which are on narrows things down a lot.
+      options:
+        - label: '`easy-headroom.rtk.enabled` (RTK)'
+        - label: '`easy-headroom.headroom.enabled` (Headroom proxy)'
+        - label: '`easy-headroom.tokensave.enabled` (TokenSave)'
+
+  - type: input
+    id: tool-versions
+    attributes:
+      label: RTK / Headroom / TokenSave versions
+      description: Hover the shield icon in the status bar — the tooltip lists one version per tool.
+      placeholder: 'RTK 0.43.0, Headroom 0.31.0, TokenSave 7.8.1'
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Extension log
+      description: |
+        View → Output → pick **easy-headroom** in the dropdown, and paste the contents.
+        输出面板 → 选择 easy-headroom 通道，粘贴日志。
+        Please redact any token/URL you don't want public.
+      render: text
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: '`easy-headroom.*` settings'
+      description: |
+        Optional but useful — from your `settings.json`, with `remoteUrl`/`proxyToken` redacted.
+      render: json
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?

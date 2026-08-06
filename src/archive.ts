@@ -24,12 +24,17 @@ export async function download(url: string, destFile: string): Promise<void> {
 
 export async function extractZipWindows(zipPath: string, destDir: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('powershell.exe', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`,
-    ]);
+    const child = spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`,
+      ],
+      // Without this, every extraction flashes a console window on the user's desktop.
+      { windowsHide: true }
+    );
     child.on('error', reject);
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`Expand-Archive exited ${code}`))));
   });

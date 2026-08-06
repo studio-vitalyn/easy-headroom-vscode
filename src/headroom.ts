@@ -22,7 +22,7 @@ function run(bin: string, args: string[]): Promise<{ code: number | null }> {
 
 function runCapture(bin: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d.toString()));
@@ -57,7 +57,8 @@ async function commandWorks(bin: string, args: string[]): Promise<boolean> {
 async function isWindowsStorePythonStub(bin: string): Promise<boolean> {
   try {
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(bin, ['-c', 'import sys; print(sys.executable)']);
+      const { bin: exe, args } = splitInterpreter(bin);
+      const child = spawn(exe, [...args, '-c', 'import sys; print(sys.executable)'], { windowsHide: true });
       let out = '';
       child.stdout.on('data', (d) => (out += d.toString()));
       child.on('error', reject);
@@ -75,7 +76,11 @@ const MIN_PYTHON: [number, number] = [3, 10];
 async function pythonVersionAtLeastMin(bin: string): Promise<boolean> {
   try {
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(bin, ['-c', 'import sys; print("%d.%d" % sys.version_info[:2])']);
+      // `bin` may be a multi-word interpreter ("py -3") — see findPythonInterpreter.
+      const { bin: exe, args } = splitInterpreter(bin);
+      const child = spawn(exe, [...args, '-c', 'import sys; print("%d.%d" % sys.version_info[:2])'], {
+        windowsHide: true,
+      });
       let out = '';
       child.stdout.on('data', (d) => (out += d.toString()));
       child.on('error', reject);

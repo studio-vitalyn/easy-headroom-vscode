@@ -2,6 +2,12 @@
 
 All notable changes to the easy-headroom extension are documented here.
 
+## 0.4.1
+
+### Fixed
+- **BUGFIX [#1](https://github.com/studio-vitalyn/easy-headroom-vscode/issues/1) — Windows: no more console windows popping up.** Every child process the extension spawns (`rtk gain`/`rtk --version` on the status bar's 30s poll, `rtk init`, `tokensave`, the Python/Headroom probes, PowerShell's `Expand-Archive`) now passes `windowsHide: true`, so nothing flashes a `cmd`/console window on the desktop anymore. The status bar poll made this recur every 30 seconds, which is why closing the window only brought it back.
+- **Windows: the `py -3` Python launcher was never actually selected.** Its version probe spawned the literal string `"py -3"` as an executable, which always failed, so detection silently fell through to a bare `python` (possibly the Microsoft Store stub).
+
 ## 0.4.0
 
 ### Added

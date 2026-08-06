@@ -171,6 +171,9 @@ export class ProxyDaemonManager {
     const log = await fs.open(this.paths.proxyLogFile, 'a');
     const child = spawn(headroomBinPath, ['proxy', '--port', String(port)], {
       detached: true,
+      // Windows: keeps the daemon from getting a console window of its own — `detached` alone
+      // already implies DETACHED_PROCESS, this is belt-and-braces for the same thing.
+      windowsHide: true,
       stdio: ['ignore', log.fd, log.fd],
       // Required for `headroom learn --verbosity` to have anything to measure — see runHeadroomLearn.
       env: { ...process.env, HEADROOM_OUTPUT_SHAPER: '1' },
