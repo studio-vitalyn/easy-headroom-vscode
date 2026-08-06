@@ -33,6 +33,25 @@ API call, and codebase-exploration query.
 - **Stays out of your way.** Don't want Headroom? Enable RTK only —
   zero network config touched.
 
+## The status bar shield — click it 👉 🛡️
+
+Everything this extension shows you lives behind **one button**: the
+🛡️ shield in the status bar, bottom right of the window.
+
+- When VS Code starts, it briefly announces itself as an animated
+  **easy-headroom** label on an orange background, then settles down to
+  the shield alone.
+- **Click it** to open your dashboard: Headroom, RTK, TokenSave and CO₂
+  tabs, plus a **Settings** tab where every option below can be changed
+  without leaving the panel.
+- **Hover it** for a summary: which of the three layers are enabled,
+  the version of each, and the total tokens saved.
+- **Green shield** = everything is running. **Red shield** = something
+  needs you (a failed setup step, an unreachable proxy, a missing
+  `remoteUrl`) — the tooltip says which layer, and a misconfigured
+  Headroom opens straight onto the Settings tab so you can fix it
+  there.
+
 ## Install
 
 [![Install in VS Code](https://img.shields.io/badge/VS%20Code-Install-blue?logo=visualstudiocode)](vscode:extension/Vitalyn.easy-headroom)
@@ -60,8 +79,8 @@ code --install-extension Vitalyn.easy-headroom
      machine. Nothing else to set up.
    - **remote** — already have a centralized Headroom instance running?
      Just point `remoteUrl` at it.
-4. Click the status bar item any time to jump to your savings
-   dashboard.
+4. Click the 🛡️ shield in the status bar any time to jump to your
+   savings dashboard — see above.
 
 ## Running Headroom on multiple hosts?
 

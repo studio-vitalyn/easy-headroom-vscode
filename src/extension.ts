@@ -16,7 +16,7 @@ import {
   TokensaveIndexFailure,
 } from './tokensave';
 import { ProxyDaemonManager } from './daemon';
-import { HeadroomStatusBar } from './statusBar';
+import { ActivationIndicator, HeadroomStatusBar } from './statusBar';
 import { RtkReportingWatcher } from './rtkReporting';
 import { TokensaveReportingWatcher } from './tokensaveReporting';
 import { UpdateCheckTimer } from './updateCheck';
@@ -35,6 +35,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(outputChannel);
   daemon = new ProxyDaemonManager(context);
   registerCommands(context, daemon);
+
+  // Runs for the whole setup below — see ActivationIndicator for why it exists. Registered for
+  // disposal too, so a throw anywhere in activate() can't leave it spinning forever.
+  const activationIndicator = new ActivationIndicator();
+  activationIndicator.start();
+  context.subscriptions.push({ dispose: () => activationIndicator.dispose() });
 
   let rtkBinPath: string | undefined;
   let rtkFailures: RtkInitFailure[] = [];
@@ -125,6 +131,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   await daemon.applyEnvironment();
   daemon.startLifecycleTimers();
+
+  // Hands over to the steady-state item only once the animation has had its minimum run — avoids
+  // both a flicker on a fully-cached setup and the two items showing side by side.
+  await activationIndicator.finish();
 
   statusBar = new HeadroomStatusBar(
     context,

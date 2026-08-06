@@ -10,6 +10,62 @@ import { log } from './log';
 const SPARKLINE_CHARS = '▁▂▃▄▅▆▇█';
 const POLL_INTERVAL_MS = 30_000;
 
+const ACTIVATION_LABEL = 'easy-headroom';
+const ACTIVATION_FRAME_MS = 120;
+// Setup is often fully cached and finishes in a few hundred ms — without a floor, the one moment
+// the extension gets to be noticed would be a flicker.
+const ACTIVATION_MIN_VISIBLE_MS = 3_000;
+
+/**
+ * Temporary status bar item, shown from the first line of `activate()` until setup finishes: the
+ * steady-state item is a bare `$(shield)` that's very easy to never notice, so activation is the
+ * one moment where the extension names itself and points at its own button. The name is spelled
+ * out next to the icon with a single letter capitalized at a time, running left to right on an
+ * orange (warning) background — motion is what actually catches an eye in a crowded status bar.
+ * Replaced by `HeadroomStatusBar` once setup is done, which then stays quiet for good.
+ */
+export class ActivationIndicator {
+  private readonly item: vscode.StatusBarItem;
+  private readonly shownAt = Date.now();
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private frame = 0;
+
+  constructor() {
+    this.item = vscode.window.createStatusBarItem('easy-headroom.activation', vscode.StatusBarAlignment.Right, 100);
+    this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    this.item.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+    this.item.tooltip = 'easy-headroom is setting up RTK, Headroom and TokenSave — click this item any time to open your savings dashboard.';
+    this.item.command = 'easy-headroom.openDashboard';
+  }
+
+  start(): void {
+    this.render();
+    this.item.show();
+    this.timer = setInterval(() => this.render(), ACTIVATION_FRAME_MS);
+  }
+
+  private render(): void {
+    const lit = this.frame++ % ACTIVATION_LABEL.length;
+    const label = [...ACTIVATION_LABEL].map((c, i) => (i === lit ? c.toUpperCase() : c)).join('');
+    this.item.text = `$(shield) ${label}`;
+  }
+
+  /** Resolves once the animation has been up long enough to be seen, then removes the item. */
+  async finish(): Promise<void> {
+    const remaining = ACTIVATION_MIN_VISIBLE_MS - (Date.now() - this.shownAt);
+    if (remaining > 0) {
+      await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+    this.dispose();
+  }
+
+  dispose(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.item.dispose();
+  }
+}
+
 type DaemonState = 'ok' | 'not-initialized' | 'error';
 
 /**

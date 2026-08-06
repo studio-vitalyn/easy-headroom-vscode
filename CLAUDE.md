@@ -671,6 +671,29 @@ would both try to bind the same port and collide.
 
 ### Status bar
 
+- **Activation indicator** (`ActivationIndicator`, `statusBar.ts`) — a
+  *separate*, temporary status bar item (own id
+  `easy-headroom.activation`, same alignment/priority), created and
+  started on the first lines of `activate()` and disposed right before
+  `HeadroomStatusBar` is constructed. It exists because the
+  steady-state item is a bare `$(shield)` with no label (see below),
+  which users genuinely don't notice — activation is the one moment
+  where the extension gets to name itself and point at its own button.
+  Renders `$(shield) easy-headroom` with a single letter capitalized at
+  a time, advancing every 120 ms, on `statusBarItem.warningBackground`
+  (orange). Two deliberate details:
+  - `finish()` enforces a **3 s minimum visible time** before
+    disposing, and `activate()` awaits it. Setup is usually fully
+    cached and returns in a few hundred ms, so without the floor the
+    animation would be a flicker; awaiting it also guarantees the two
+    items never show side by side. Nothing after that point in
+    `activate()` is latency-sensitive (env, daemon and lifecycle timers
+    are already done by then).
+  - It is **not** reused for progress reporting — no per-step text, no
+    percentage. It says nothing about *what* is happening, only that
+    something is, which keeps it independent of the RTK/Headroom/
+    TokenSave split (see the guiding principle at the end of this file)
+    and keeps it a pure attention-grabber.
 - Single brand icon, `$(shield)`, recolored rather than swapped between
   states — no separate check/error glyph and no `easy-headroom` text
   label next to it (dropped in favor of the icon alone). Stands in for

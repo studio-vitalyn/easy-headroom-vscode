@@ -2,6 +2,12 @@
 
 All notable changes to the easy-headroom extension are documented here.
 
+## 0.5.0
+
+### Added
+- **The status bar item now announces itself on startup.** While the extension sets up, a temporary orange item spells out `easy-headroom` next to the shield with a letter capitalized at a time, running left to right; it disappears once setup is done, leaving the usual quiet shield. The shield is the only entry point to the dashboard and was easy to miss entirely.
+- README now documents the shield: what a click, a hover, and a green/red state each get you.
+
 ## 0.4.1
 
 ### Fixed
