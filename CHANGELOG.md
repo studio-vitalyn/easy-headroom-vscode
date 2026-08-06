@@ -2,6 +2,14 @@
 
 All notable changes to the easy-headroom extension are documented here.
 
+## 0.4.0
+
+### Added
+- **CO2** tab now also allocates **TokenSave**'s savings across models, alongside RTK's — as its own orange column, headline row and legend entry, never merged into Headroom's or RTK's figures. Like RTK's, this is a proxy on top of a proxy (TokenSave has no per-model attribution either, so Headroom's own per-model token mix is used as the distribution), spelled out in the tab's disclaimer. The tab-bar metric sums the three sources.
+
+### Fixed
+- RTK tab's "current project" filter matched the project path exactly, so nothing showed for commands run from a subdirectory of the workspace — now matches by path prefix.
+
 ## 0.3.0
 
 ### Added
@@ -9,9 +17,16 @@ All notable changes to the easy-headroom extension are documented here.
 - `easy-headroom` output channel (`View → Output → easy-headroom`) logging RTK/Headroom/TokenSave setup outcomes on activation, so a missed notification isn't the only record of a setup failure.
 - Status bar tooltip now shows each layer's installed version — RTK, Headroom (local venv version, or the *remote* instance's own reported version when `mode = remote`), and TokenSave — so a stale or forgotten remote config is visible at a glance instead of only inferable from a generic warning.
 - Hourly background re-check (`UpdateCheckTimer`) that keeps TokenSave and Headroom actually current in a long-lived window — previously their own 24h upgrade check was only ever triggered once, at activation, so a window left open for days could silently sit on a stale binary.
+- New **TokenSave** dashboard tab, alongside Headroom's, RTK's and CO2's: savings cards, a history chart with a range picker (`today`/`7d`/`30d`/`month`/`all`), and an index-health note (symbol/file counts, DB size, last sync) so a stale index is visible rather than silently under-reporting.
+- TokenSave remote-mode reporting, mirroring RTK's: new savings rows are pushed incrementally to `/tokensave/ingest` with checkpoint reconciliation, and the TokenSave tab reads back from `/tokensave/aggregate` (project selector defaulting to the current project, fixed daily/weekly/monthly buckets) instead of only shelling out to the local CLI.
 - New **Settings** dashboard tab: a simplified, per-setting scope picker (User/Workspace/WorkspaceFolder, with a Remote-SSH-aware "User (Remote)" label) on top of the same real `contributes.configuration` values, so switching modes or pinning a version no longer requires the native Settings UI. Always reachable, even with every other layer disabled — writing at a broader scope while a narrower one already holds an override now asks for confirmation before clearing it, since that override may be a colleague's deliberate choice in a shared workspace, not a leftover.
 
+### Changed
+- **Breaking setting rename**: `easy-headroom.headroom.mode`, `.headroom.remoteUrl` and `.headroom.proxyToken` moved up to `easy-headroom.mode`, `easy-headroom.remoteUrl` and `easy-headroom.proxyToken`. They describe the shared instance itself, not Headroom specifically — every layer (Headroom, RTK reporting, TokenSave) now reads them independently, so disabling Headroom no longer silently disables RTK's remote stats. Existing values under the old keys are not migrated automatically; re-set them from the Settings tab.
+- Status bar click now opens the dashboard directly instead of a Dashboard/Settings quick pick (the `easy-headroom.statusBarMenu` command is gone) — the dashboard has its own Settings tab now.
+
 ### Fixed
+- A misconfigured Headroom (enabled but with no resolvable target, e.g. remote mode without a `remoteUrl`) blocked the entire dashboard behind an error popup. It now opens on the Settings tab instead, so the misconfiguration can actually be fixed from there.
 - Status bar's broken state (RTK/TokenSave setup failures, Headroom misconfigured or unreachable) now renders as a red pill (`statusBarItem.errorBackground` + `errorForeground`) instead of a barely-visible recolored icon.
 - Status bar tooltip was missing TokenSave's enabled/disabled state and indexing-failure details entirely.
 
