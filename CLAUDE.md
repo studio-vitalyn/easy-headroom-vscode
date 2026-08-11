@@ -129,8 +129,8 @@ shared across multiple machines, and is designed separately.
      `docker-easy-headroom`).
 4. **Per-project attribution** — every window's `ANTHROPIC_BASE_URL`
    is suffixed with `/p/<project-slug>` (derived from
-   `easy-headroom.projectName` if set, else the VS Code workspace
-   name — see `projectSlug()` in `slug.ts`), so Headroom can break
+   `easy-headroom.projectName` if set, else the root workspace
+   folder's name — see `projectSlug()` in `slug.ts`), so Headroom can break
    down usage/savings per project even though the underlying proxy
    process (local mode) is shared across all of them.
 5. **RTK can run standalone**, with no notion of a proxy at all — this
@@ -621,10 +621,23 @@ would both try to bind the same port and collide.
   `headroom proxy` **detached** (`{ detached: true }`, then
   `child.unref()`) so it survives independently of the spawning
   window, and write its PID to a lock file in `globalStorageUri`.
-- **Per-project attribution**: each window computes a slug from
-  `vscode.workspace.name` (or the first workspace folder's name in a
-  single-root window), sanitized to lowercase
-  alphanumeric-and-hyphens, and sets its *own* `ANTHROPIC_BASE_URL` —
+- **Per-project attribution**: each window computes a slug from the
+  root workspace folder's name (`workspaceFolders[0].name`), sanitized
+  to lowercase alphanumeric-and-hyphens, and sets its *own*
+  `ANTHROPIC_BASE_URL` —
+  **not** from `vscode.workspace.name`, which VS Code decorates with
+  the remote label and the localized "(Workspace)" suffix: over
+  Remote-SSH that turned every project into `<name>-ssh-<host>` (and a
+  multi-root one into `<name>-espace-de-travail-ssh-<host>`), so the
+  same project reported under a different slug per host — exactly what
+  the per-project breakdown exists to avoid. `workspaceFolders[0].name`
+  is the bare directory basename and is never decorated;
+  `workspace.name` remains a fallback for the no-folder case, run
+  through `undecorate()` (`slug.ts`) to strip any trailing
+  `[...]`/`(...)` groups. Slugs computed before this fix stay on the
+  dashboard under their old names — set `easy-headroom.projectName`
+  explicitly to keep reporting under one of them.
+  The env var is set —
   via `context.environmentVariableCollection.replace(...)` (scoped
   only to that window's integrated terminals, never a global env
   var) — to `http://127.0.0.1:<port>/p/<slug>` (local) or
