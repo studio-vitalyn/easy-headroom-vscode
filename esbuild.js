@@ -5,6 +5,11 @@ const path = require('path');
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
 
+// package.json's version is always a plain x.y.z — a "-dev" suffix must never reach a commit or a
+// published artifact. It's appended here instead, only for a non-production build, so a locally
+// built extension host identifies itself as such in the status bar tooltip. See buildInfo.ts.
+const extensionVersion = require('./package.json').version + (production ? '' : '-dev');
+
 // esbuild bundles sql.js's JS glue into dist/extension.js but can't inline its .wasm binary —
 // copy it alongside so rtkDb.ts's `locateFile: (file) => path.join(__dirname, file)` finds it
 // at runtime (bundled CJS output's __dirname resolves to this same dist/ directory).
@@ -37,6 +42,7 @@ async function main() {
     platform: 'node',
     outfile: 'dist/extension.js',
     external: ['vscode'],
+    define: { __EXT_VERSION__: JSON.stringify(extensionVersion) },
     logLevel: 'info',
   });
   if (watch) {

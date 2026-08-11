@@ -20,6 +20,7 @@ import { ActivationIndicator, HeadroomStatusBar } from './statusBar';
 import { RtkReportingWatcher } from './rtkReporting';
 import { TokensaveReportingWatcher } from './tokensaveReporting';
 import { UpdateCheckTimer } from './updateCheck';
+import { EXTENSION_VERSION } from './buildInfo';
 import { registerCommands } from './commands';
 import { formatError } from './errors';
 import { outputChannel, log } from './log';
@@ -140,7 +141,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context,
     rtkBinPath,
     rtkFailures,
-    context.extension.packageJSON.version,
+    EXTENSION_VERSION,
     tokensaveIndexFailures,
     tokensaveBinPath
   );

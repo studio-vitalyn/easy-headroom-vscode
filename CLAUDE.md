@@ -855,10 +855,9 @@ Headroom proxy itself is configured).
   oversight: a tab bar with one dead/greyed-out button would be worse
   than no tab bar.
 - **`#tabbar` itself always renders**, independent of `showTabs` — its
-  first child is a `.brand-block` (extension icon + `v<version>`,
-  read via `context.extension.packageJSON.version` rather than an
-  imported `package.json`, since `tsconfig.json`'s `rootDir: "src"`
-  rules out reaching one directory up). This is branding, not a tab —
+  first child is a `.brand-block` (the extension icon alone — the
+  version string lives in the status bar tooltip instead, see
+  "Versioning of the extension itself" below). This is branding, not a tab —
   it's not clickable and isn't part of the `tabs`/`views` maps in the
   inline script. The icon reaches the webview via
   `panel.webview.asWebviewUri(...)` + `localResourceRoots: [.../assets]`
@@ -1378,16 +1377,8 @@ published extension). `publish-vscode.sh` packages and publishes the
 vsix to the Marketplace; `release-vscode.sh` then mirrors that same
 vsix as a GitHub release asset on `studio-vitalyn/easy-headroom-vscode`
 — a changelog/backup artifact only, not an alternate install path.
-`package.json`'s `version` carries a `-dev` suffix while work is in
-progress (e.g. `0.2.0-dev`), both as a visible "not yet released"
-marker and because it makes an accidental double-publish of an
-unfinished version fail loudly. `publish-vscode.sh` strips it (vsce
-requires a strict `x.y.z` version anyway), packages/publishes under
-the stripped version, then restores the `-dev` `package.json` via a
-`trap`; bumping to the *next* `-dev` version afterward, to resume
-work, is a manual step. `release-vscode.sh` independently derives the
-same stripped version to find/tag the already-built vsix — it never
-touches `package.json`.
+See "Versioning of the extension itself" below for how `-dev` is
+handled.
 Headroom install is a global-per-host Python venv
 (`headroom-ai[proxy,code]`), not a downloaded binary — see "Headroom
 install — Python venv, not a binary".
@@ -1425,6 +1416,40 @@ plumbing first and gather real usage data across several projects over
 a few days before deciding whether a dashboard is worth building at
 all, rather than building one speculatively. See "TokenSave install"
 above for the install/versioning details.
+
+## Versioning of the extension itself
+
+**`package.json`'s `version` is always a plain `x.y.z`, in every
+commit, and is published exactly as written.** It names the version
+currently being worked toward, so between two releases it's one ahead
+of what's on the Marketplace. Nothing rewrites it: `publish-vscode.sh`
+reads it, refuses outright if it carries a `-dev` suffix, and packages
+under it; `release-vscode.sh` reads the same value to find and tag the
+already-built vsix. Neither touches the file, so there's no
+`npm version`/`trap`-restore dance to leave the working tree dirty if
+a publish fails halfway.
+
+The `-dev` marker still exists, but it is a **build artifact, not a
+file value** — `esbuild.js` appends it to `EXTENSION_VERSION`
+(`buildInfo.ts`, injected via esbuild's `define` as `__EXT_VERSION__`)
+for any non-production build, i.e. `npm run compile`/`watch`, which is
+what F5's Extension Development Host runs. `npm run package`
+(`--production`, what `vsce:prepublish` invokes) leaves it off. So a
+locally built extension host identifies itself as `0.6.0-dev` in the
+status bar tooltip while the published one says `0.6.0`, and the
+suffix can't reach a commit or a vsix by construction.
+
+This replaces an earlier scheme where `package.json` itself carried
+the `-dev` suffix and the publish script stripped/restored it. That
+worked, but it meant every in-progress commit pushed a `-dev` version
+to the remote — the marker leaked out of the machine it was meant to
+describe. The double-publish protection it also provided is not lost:
+`vsce publish` refuses a version already on the Marketplace, and
+`publish-vscode.sh` now additionally requires a matching
+`## <version>` section in `CHANGELOG.md` before it will publish (the
+check `release-vscode.sh` already did for its release notes, moved
+ahead of the irreversible step) — so a version bumped without deciding
+what shipped in it fails before anything is pushed.
 
 ## Guiding principle for Claude Code
 
