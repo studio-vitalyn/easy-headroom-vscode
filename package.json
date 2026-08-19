@@ -2,7 +2,7 @@
   "name": "easy-headroom",
   "displayName": "Easy Headroom",
   "description": "Installs, configures, and manages RTK and Headroom automatically to reduce token consumption for Claude Code, Gemini CLI, and Codex CLI.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "Vitalyn",
   "author": {
     "name": "Vitalyn",
@@ -172,7 +172,7 @@
       },
       {
         "command": "easy-headroom.uninstallCleanup",
-        "title": "easy-headroom: Uninstall / Clean Up"
+        "title": "easy-headroom: Unwrap All (Uninstall / Clean Up)"
       }
     ]
   },
@@ -180,6 +180,7 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "package": "node esbuild.js --production",
+    "package:dev": "EH_DEV_BUILD=1 npx --offline @vscode/vsce package --no-dependencies --out easy-headroom-$npm_package_version-dev.vsix",
     "typecheck": "tsc --noEmit -p .",
     "vscode:prepublish": "npm run package"
   },

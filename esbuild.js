@@ -2,7 +2,10 @@ const esbuild = require('esbuild');
 const fs = require('fs');
 const path = require('path');
 
-const production = process.argv.includes('--production');
+// `vsce package` always runs `vscode:prepublish` (i.e. `--production`), so a locally installed
+// vsix would otherwise be indistinguishable from a published one. EH_DEV_BUILD=1 overrides the
+// flag back to a dev build — that's what `npm run package:dev` sets; publish-vscode.sh never does.
+const production = process.argv.includes('--production') && process.env.EH_DEV_BUILD !== '1';
 const watch = process.argv.includes('--watch');
 
 // package.json's version is always a plain x.y.z — a "-dev" suffix must never reach a commit or a

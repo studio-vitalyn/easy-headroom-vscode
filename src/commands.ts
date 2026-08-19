@@ -1,5 +1,4 @@
 import * as crypto from 'crypto';
-import * as fs from 'fs/promises';
 import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
@@ -7,11 +6,10 @@ import * as vscode from 'vscode';
 import { config } from './config';
 import { storagePaths } from './paths';
 import { ProxyDaemonManager, checkHealth } from './daemon';
+import { runFullCleanup, formatCleanupReport, type CleanupReport } from './cleanup';
+import { knownUpdates, type ToolId } from './systemUpdates';
+import { log, outputChannel } from './log';
 import { listRtkReleases, listHeadroomReleases, listTokensaveReleases } from './versions';
-import { removeHeadroomWrap, clearProjectEnv } from './claudeSettings';
-import { removeRtkIntegration } from './rtkAgents';
-import { pathExists } from './archive';
-import { runCapture } from './tokensave';
 import { getRtkStats, getRtkProjects } from './rtkStats';
 import { projectSlug } from './slug';
 import {
@@ -401,6 +399,19 @@ function renderDashboardHtml(opts: {
   .setting-scope-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
   .setting-scope-label { font-size: 11px; opacity: 0.75; }
   .scope-select { font-size: 11px; padding: 1px 4px; }
+  .update-notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground)); border-radius: 6px; font-size: 12px; }
+  .update-notice code { font-family: var(--vscode-editor-font-family, monospace); opacity: 0.9; }
+  .update-notice .spacer { flex: 1; }
+  .update-notice button { font: inherit; padding: 3px 10px; border-radius: 4px; cursor: pointer; border: 1px solid var(--vscode-button-border, transparent); background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit); }
+  .danger-zone { margin-top: 28px; padding: 14px; border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); border-radius: 6px; }
+  .danger-zone h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-errorForeground); }
+  .danger-zone p { margin: 0 0 10px; font-size: 11px; opacity: 0.8; max-width: 560px; }
+  .danger-btn {
+    font-size: 12px; padding: 4px 12px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+    background: transparent; color: var(--vscode-errorForeground);
+  }
+  .danger-btn:hover { background: var(--vscode-inputValidation-errorBackground, transparent); }
   .tab-btn-icon { flex-direction: row; align-items: center; justify-content: center; margin-left: auto; padding: 2px 6px; }
   .tab-btn-icon .tab-icon { font-size: 22px; line-height: 1; }
   .pick-version-btn {
@@ -521,7 +532,19 @@ ${
     : ''
 }
   <div class="view${showTabs && defaultTab !== 'settings' ? ' hidden' : ''}" id="view-settings">
+    <div id="update-notices"></div>
     <div id="settings-content"></div>
+    <div class="danger-zone" id="danger-zone">
+      <h3>Unwrap all</h3>
+      <p>
+        VS Code gives extensions no uninstall hook, so disabling or uninstalling easy-headroom leaves
+        everything it set up in place. This undoes all of it: the RTK integrations, the Headroom
+        managed env vars, the TokenSave MCP registration and git hooks, and the binaries this
+        extension downloaded. Your projects, their indexes and your usage history are untouched, and
+        so is any copy of these tools you installed yourself.
+      </p>
+      <button type="button" class="danger-btn" id="unwrap-all-btn">Unwrap all…</button>
+    </div>
   </div>
 </div>
 <script nonce="${nonce}">
@@ -851,6 +874,42 @@ ${
   // Group/label/type/description/scope all come from package.json's contributes.configuration
   // (see settingsMeta.ts) — this only builds the DOM and wires up writes, it doesn't hardcode
   // any of that metadata itself.
+  // Binaries the extension deferred to instead of installing: it never upgrades those, so the only
+  // thing it can usefully do is say so where the versions are already on screen.
+  function renderUpdateNotices(updates) {
+    const host = document.getElementById('update-notices');
+    if (!host) return;
+    host.innerHTML = '';
+    updates.forEach((u) => {
+      const row = document.createElement('div');
+      row.className = 'update-notice';
+      const text = document.createElement('span');
+      text.textContent = u.tool + ' ' + u.current + ' is installed on this machine — ' + u.latest + ' is available.';
+      row.appendChild(text);
+      if (u.upgradeCommand) {
+        const cmd = document.createElement('code');
+        cmd.textContent = u.upgradeCommand;
+        row.appendChild(cmd);
+      }
+      const spacer = document.createElement('span');
+      spacer.className = 'spacer';
+      row.appendChild(spacer);
+      if (u.upgradeCommand) {
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.textContent = 'Copy command';
+        copy.addEventListener('click', () => vscode.postMessage({ type: 'settings:copyUpgrade', tool: u.tool }));
+        row.appendChild(copy);
+      }
+      const notes = document.createElement('button');
+      notes.type = 'button';
+      notes.textContent = 'Release notes';
+      notes.addEventListener('click', () => vscode.postMessage({ type: 'settings:releaseNotes', tool: u.tool }));
+      row.appendChild(notes);
+      host.appendChild(row);
+    });
+  }
+
   function renderSettings(groups) {
     const el = document.getElementById('settings-content');
     if (!el) return;
@@ -1002,6 +1061,7 @@ ${
     if (msg.type === 'settings:data') {
       remoteName = msg.remoteName;
       renderSettings(msg.groups);
+      renderUpdateNotices(msg.updates || []);
       return;
     }
     if (msg.type === 'dashboard:focusTab') {
@@ -1088,6 +1148,14 @@ ${
   if (document.getElementById('view-tokensave')) {
     vscode.postMessage({ type: 'tokensave:init' });
   }
+  const unwrapBtn = document.getElementById('unwrap-all-btn');
+  if (unwrapBtn) {
+    unwrapBtn.addEventListener('click', () => {
+      // Confirmation lives on the host side (a real modal dialog) — the webview only asks.
+      vscode.postMessage({ type: 'settings:unwrapAll' });
+    });
+  }
+
   vscode.postMessage({ type: 'settings:init' });
 })();
 </script>
@@ -1095,7 +1163,7 @@ ${
 </html>`;
 }
 
-async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
+async function openDashboard(context: vscode.ExtensionContext, daemon: ProxyDaemonManager): Promise<void> {
   let headroomAvailable = config.headroomEnabled();
   const rtkAvailable = rtkDashboardAvailable();
   const tokensaveAvailable = tokensaveDashboardAvailable();
@@ -1145,6 +1213,7 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
     void panel.webview.postMessage({
       type: 'settings:data',
       groups: buildSettingsSnapshot(context),
+      updates: knownUpdates(),
       remoteName: vscode.env.remoteName,
     });
   };
@@ -1187,6 +1256,7 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
       value?: unknown;
       target?: TargetName;
       field?: string;
+      tool?: ToolId;
     }) => {
       if (msg?.type === 'rtk:init' || msg?.type === 'rtk:selectProject') {
         const project =
@@ -1241,6 +1311,24 @@ async function openDashboard(context: vscode.ExtensionContext): Promise<void> {
         // fires async on VS Code's own timing — resend here too so the scope select and any
         // dependent value the user just touched update without a visible delay.
         postSettingsSnapshot();
+        return;
+      }
+      if (msg?.type === 'settings:copyUpgrade' || msg?.type === 'settings:releaseNotes') {
+        const update = knownUpdates().find((u) => u.tool === msg.tool);
+        if (!update) return;
+        if (msg.type === 'settings:releaseNotes') {
+          void vscode.env.openExternal(vscode.Uri.parse(update.releasesUrl));
+        } else if (update.upgradeCommand) {
+          await vscode.env.clipboard.writeText(update.upgradeCommand);
+          void vscode.window.showInformationMessage(`Copied: ${update.upgradeCommand}`);
+        }
+        return;
+      }
+      if (msg?.type === 'settings:unwrapAll') {
+        const report = await confirmAndRunCleanup(context, daemon);
+        // Cleanup rewrites what the settings snapshot reports (installed versions, wrap state), so
+        // refresh the tab — but only if the user actually went through with it.
+        if (report) postSettingsSnapshot();
         return;
       }
       if (msg?.type === 'settings:pickVersion' && msg.field) {
@@ -1320,39 +1408,45 @@ async function selectTokensaveVersion(): Promise<void> {
   );
 }
 
-async function uninstallCleanup(context: vscode.ExtensionContext, daemon: ProxyDaemonManager): Promise<void> {
+const CLEANUP_CONFIRM_DETAIL =
+  'Removes the RTK integration for every agent, the Headroom managed env vars from ' +
+  '~/.claude/settings.json and every project this extension has touched, the TokenSave MCP ' +
+  'registration and git hooks, and deletes the binaries this extension downloaded (RTK, the ' +
+  'Headroom venv, TokenSave) plus its own state files. Your projects, their .tokensave/ indexes ' +
+  'and your RTK/TokenSave history are left untouched, as is any copy of these tools you installed ' +
+  'yourself. Continue?';
+
+/**
+ * Shared by the `easy-headroom.uninstallCleanup` command and the Settings tab's danger-zone button:
+ * confirm, run, then leave the full report in the output channel rather than in a toast — the list
+ * of manual leftovers is far too long for a notification, but it's the part the user actually needs.
+ */
+export async function confirmAndRunCleanup(
+  context: vscode.ExtensionContext,
+  daemon: ProxyDaemonManager
+): Promise<CleanupReport | undefined> {
   const confirmed = await vscode.window.showWarningMessage(
-    'This removes the RTK integration for every configured agent, the Headroom wrap from ' +
-      '~/.claude/settings.json, and the TokenSave MCP registration, deletes the downloaded RTK ' +
-      'binary, Headroom venv, and TokenSave binary, and stops the shared proxy daemon if running. ' +
-      'Continue?',
-    { modal: true },
+    'easy-headroom: clean up everything this extension installed?',
+    { modal: true, detail: CLEANUP_CONFIRM_DETAIL },
     'Clean Up'
   );
-  if (confirmed !== 'Clean Up') return;
+  if (confirmed !== 'Clean Up') return undefined;
 
-  await daemon.stop();
-  for (const agent of config.rtkAgents()) {
-    await removeRtkIntegration(agent);
-  }
-  await removeHeadroomWrap();
-  await clearProjectEnv(['ANTHROPIC_BASE_URL', 'HEADROOM_OUTPUT_SHAPER']);
+  const report = await runFullCleanup(context, daemon);
+  log(formatCleanupReport(report));
 
-  const paths = storagePaths(context);
-  if (await pathExists(paths.tokensaveBinPath)) {
-    try {
-      await runCapture(paths.tokensaveBinPath, ['uninstall', '--agent', 'claude']);
-    } catch {
-      // Best-effort — the binary is about to be deleted regardless, and a failed unregister
-      // just leaves a stale MCP entry the user can remove by hand.
-    }
-  }
-  await fs.rm(paths.rtkBinDir, { recursive: true, force: true });
-  await fs.rm(paths.headroomVenvDir, { recursive: true, force: true });
-  await fs.rm(paths.tokensaveBinDir, { recursive: true, force: true });
-  await fs.rm(paths.tokensaveVersionFile, { force: true });
+  const summary =
+    `easy-headroom: cleanup done — ${report.done.length} removed, ` +
+    `${report.manual.length} left for you` +
+    (report.errors.length ? `, ${report.errors.length} failed` : '') +
+    '.';
+  void vscode.window
+    .showInformationMessage(summary, 'Show Details')
+    .then((choice) => {
+      if (choice === 'Show Details') outputChannel.show(true);
+    });
 
-  void vscode.window.showInformationMessage('easy-headroom: cleanup complete.');
+  return report;
 }
 
 async function connectionTestBeforeRemote(): Promise<void> {
@@ -1368,13 +1462,13 @@ async function connectionTestBeforeRemote(): Promise<void> {
 
 export function registerCommands(context: vscode.ExtensionContext, daemon: ProxyDaemonManager): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('easy-headroom.openDashboard', () => openDashboard(context)),
+    vscode.commands.registerCommand('easy-headroom.openDashboard', () => openDashboard(context, daemon)),
     vscode.commands.registerCommand('easy-headroom.openSettings', openSettings),
     vscode.commands.registerCommand('easy-headroom.stopProxy', () => daemon.stop()),
     vscode.commands.registerCommand('easy-headroom.selectRtkVersion', selectRtkVersion),
     vscode.commands.registerCommand('easy-headroom.selectHeadroomVersion', selectHeadroomVersion),
     vscode.commands.registerCommand('easy-headroom.selectTokensaveVersion', selectTokensaveVersion),
-    vscode.commands.registerCommand('easy-headroom.uninstallCleanup', () => uninstallCleanup(context, daemon))
+    vscode.commands.registerCommand('easy-headroom.uninstallCleanup', () => confirmAndRunCleanup(context, daemon))
   );
 
   context.subscriptions.push(

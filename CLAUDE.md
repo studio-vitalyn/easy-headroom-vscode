@@ -55,8 +55,8 @@ extension must not pretend otherwise:
   an Anthropic-Messages-API-specific mechanism. Gemini CLI and Codex
   CLI talk to entirely different provider APIs, so there is nothing to
   generalize here without Headroom itself gaining multi-provider
-  support (not confirmed, out of scope for V1). `headroom wrap claude`
-  and all of `claudeSettings.ts` remain intentionally Claude-only.
+  support (not confirmed, out of scope for V1). `claudeSettings.ts`
+  and `claudeBinary.ts` remain intentionally Claude-only.
 - **TokenSave** (semantic code-graph MCP server) is **Claude-Code-only
   for V1** too — `tokensave install`/`uninstall --agent <id>` support
   many other agents upstream, but this extension only ever passes
@@ -81,8 +81,8 @@ parent repo, which is hosted on GitLab (not GitHub).
 RTK (shell output compression, local `PreToolUse`-style hook) and
 Headroom (API compression proxy + cache + output shaping) are two
 complementary but independent tools, each with its own manual CLI
-setup (`rtk init --global`, `headroom wrap claude`, PATH management,
-env vars). Today there is:
+setup (`rtk init --global`, Headroom env vars/`headroom wrap`, PATH
+management). Today there is:
 - no official VS Code extension that automates this setup,
 - no simple solution for a Headroom instance shared across multiple
   machines (both the official desktop app and the CLI target a
@@ -115,11 +115,13 @@ shared across multiple machines, and is designed separately.
    or both, see configuration) if missing on the machine.
 2. **Idempotent setup** — RTK's per-agent init (`rtk init --global
    --auto-patch[--gemini|--codex]`, see "Multi-agent scope" for the
-   `--auto-patch`/`--codex` interaction) and `headroom wrap claude` are
-   only re-run if
-   not already configured for that agent (see "Multi-agent scope"
-   above for exactly what's checked per agent, and "Wrap/init
-   idempotency" below).
+   `--auto-patch`/`--codex` interaction) is only re-run if not already
+   configured for that agent (see "Multi-agent scope" above for exactly
+   what's checked per agent, and "Init idempotency" below). Headroom
+   needs no equivalent gate: its routing is a pure `env`-block write
+   that is recomputed and re-applied from scratch on every activation
+   (see "Claude Code client detection" and "Why `headroom wrap` is not
+   used" below).
 3. **Two modes for Headroom**:
    - `local`: a **single `headroom proxy` daemon shared by the whole
      machine**, not one per VS Code window — see "`headroom proxy`
@@ -332,6 +334,77 @@ runtime dependency.
   — not on activation — to populate a `showQuickPick` list (latest
   first), and writes the choice to `rtk.pinnedVersion`.
 
+#### Prefer an existing system install
+
+If the user already has `rtk` on their `PATH`, `ensureRtkInstalled`
+returns *that* binary and **deletes its own copy** rather than keeping
+both (`findOnPath` in `archive.ts`, which ignores anything under
+`globalStorageUri` so our own copy can never count as "already on the
+machine").
+
+- Replacing, not shadowing, is the point. Two installs of the same tool
+  sharing one on-disk state is a real, observed failure mode, not a
+  theoretical one: a TokenSave 7.8.1 under `globalStorage` (registered
+  as the MCP server in `~/.claude.json`) and a manually-installed 7.9.0
+  in `~/.local/bin` (what Claude Code's own hooks resolved off `PATH`)
+  were driving the same `.tokensave/tokensave.db`, and the MCP server
+  disconnected mid-session. Deleting ours collapses every call site —
+  the absolute path used internally, the `PATH` prepend in
+  `applyEnvironment`, a hand-typed `rtk`/`tokensave` in a terminal —
+  onto one build.
+- A set `pinnedVersion` is explicit intent to run *that* build, so it
+  keeps the extension's own sandboxed copy and ignores the system one.
+- Consequence for `applyEnvironment` (`daemon.ts`): each bin dir is now
+  only prepended to `PATH` **if it exists**. It legitimately may not —
+  we deferred to a system install, or the cleanup deleted it — and
+  prepending a dead path either shadows the real binary with nothing or
+  points at a deleted install.
+- Cleanup never deletes a binary the extension didn't install: it only
+  `rm`s paths under `globalStorageUri`, and reports a system copy
+  instead.
+- **Headroom is deliberately excluded** from this. It's a Python venv,
+  not a static binary: an arbitrary `headroom` on `PATH` may be any
+  interpreter, any extras set (`[proxy,code]` is required), any version,
+  and no conflict has been observed there — the failure mode that
+  motivated this is specific to the two tools that share on-disk state
+  with agent-side registrations.
+
+#### Staleness notice for system binaries (`systemUpdates.ts`)
+
+Deferring to the user's own install also hands over responsibility for
+keeping it current — the 24h version gates in `tokensave.ts`/`headroom.ts`
+only ever upgrade *our* copies. Nothing was reporting that gap, and it is
+not hypothetical: an `rtk` from June sat two minor versions behind for
+months, silently, because the extension had stopped installing RTK the
+moment it found one on `PATH`.
+
+- `checkSystemBinaries(context, {rtk, tokensave})` runs `<bin> --version`,
+  compares against a single `GET /releases/latest` (`latestRelease` in
+  `versions.ts`), and records the difference. It skips any path that
+  resolves under `globalStorageUri` — our own copy self-updates, so a
+  notice there would be noise.
+- **Read-only by construction.** It never upgrades, even behind a click:
+  the binary is the user's, and for TokenSave it is also the live MCP
+  server, so swapping it mid-session is the extension's call to make
+  least of all. `tokensave upgrade` (the tool's own self-updater) is
+  offered as text to copy; RTK has no update subcommand at all, so its
+  notice can only link the releases page.
+- Cached in `globalState` under `systemUpdate.latest.<tool>` on the same
+  24h cadence as the marker files, so the periodic re-check
+  (`updateCheck.ts`) costs one unauthenticated request per tool per day.
+- Surfaced in three places, deliberately: a **one-shot notification**
+  (once per `(tool, version)`, tracked in `systemUpdate.notified.<tool>`
+  — a nag that returns on every reload is one people stop reading), the
+  **status bar tooltip** next to the version it qualifies, and a banner
+  at the top of the **Settings tab**. The last two persist after the
+  notification has been dismissed.
+- Version comparison is on the numeric triple only; a prerelease
+  compares equal to its release, so someone running ahead of a tag is
+  never told they're behind.
+- The unwrap-all cleanup clears both `globalState` keys
+  (`clearUpdateState`) — that bookkeeping survives an uninstall
+  otherwise, and would silence the first notice after a reinstall.
+
 ### RTK stats reporting — row-level sync
 
 `RtkReportingWatcher` (`rtkReporting.ts`) reads RTK's `commands` table
@@ -490,6 +563,21 @@ install does.
   binary installs. Revisit if RTK ever gains digest pinning.
 - No MCP-level idempotency check needed on our side — see "MCP server
   registration" below.
+- **Post-install version verification**: after extraction,
+  `installVersion` runs the binary's own `--version` and throws if it
+  disagrees with the tag that was just installed, before the version
+  marker is written. This guards a desync that was actually observed
+  (marker claiming `v7.9.0` over a binary reporting `7.8.1`) — the
+  cause was never pinned down (the obvious `ETXTBSY`-on-rename theory
+  doesn't hold: renaming over a running executable doesn't raise it on
+  Linux), so this is a guard, not a fix for a diagnosed root cause. A
+  marker that lies is worse than a failed install: it suppresses the
+  24h re-check forever. `getInstalledTokensaveVersion` also falls back
+  to asking the binary when no marker exists, so a system install (see
+  "Prefer an existing system install" under RTK) still reports a
+  version in the status bar.
+- The same prefer-an-existing-system-install rule applies here, and
+  additionally removes the stale version marker along with our copy.
 
 ### TokenSave index freshness — git hooks + periodic fallback
 
@@ -575,22 +663,97 @@ read.
   itself, disposed via `context.subscriptions` like every other timer
   in this file.
 
-### Wrap/init idempotency
+### Init idempotency
 
 Before calling `rtk init --global --auto-patch[...]` for a given agent, check
 whether that agent already has the RTK integration (`isRtkIntegrated`
 in `rtkAgents.ts` — reads `~/.claude/settings.json` or
 `~/.gemini/settings.json` for Claude/Gemini, `~/.codex/AGENTS.md` for
 Codex), so it doesn't re-patch on every extension activation (every VS
-Code window open). Same pattern for `headroom wrap claude` against
-`~/.claude/settings.json` (`isHeadroomWrapped` in `claudeSettings.ts`,
-Claude-only — see "Multi-agent scope").
+Code window open).
+
+There is deliberately no Headroom counterpart. An `isHeadroomWrapped`
+check existed and could never have worked: it looked for a *hook*
+containing `headroom` in `~/.claude/settings.json`, while `headroom
+wrap` writes no config at all — so it always returned false and re-ran
+the wrap on every single activation. Both it and `removeHeadroomWrap`
+are gone; see "Why `headroom wrap` is not used" below.
+
+### Claude Code client detection
+
+Headroom only ever *redirects* an existing Claude Code client —
+`ANTHROPIC_BASE_URL` routes nothing if there is nothing to route. Two
+installs count, and `findClaudeClient` (`claudeBinary.ts`) resolves
+them in this order:
+
+1. **`claude` on the PATH** — the standalone CLI install
+   (`findOnPath('claude')`, same helper the RTK/TokenSave installs use).
+2. **The Claude Code VS Code extension's bundled copy** —
+   `vscode.extensions.getExtension('Anthropic.claude-code')` →
+   `<extensionPath>/resources/native-binary/claude` (`claude.exe` on
+   win32), a ~330 MB standalone binary that reports the extension's own
+   version (`2.1.234 (Claude Code)` when verified). The extension never
+   puts it on the PATH.
+
+PATH wins when both exist, for the same reason `findOnPath` is
+consulted before downloading RTK/TokenSave: a CLI the user installed
+themselves is the one they maintain, and it keeps working outside VS
+Code — the bundled copy is pinned to whatever extension version is
+currently active and disappears when they uninstall it. The VS Code API
+(not a glob over `~/.vscode*/extensions/anthropic.claude-code-*`) is
+what resolves the *active* version; several versions commonly sit side
+by side on disk, each with its own copy.
+
+Two consumers:
+- `activate()` warns once (log + `showWarningMessage`) when neither is
+  found, in **both** modes — remote gets the same `env` block, so it has
+  the same nothing-to-route problem. Warn-only: no other setup step
+  depends on it.
+- `applyEnvironment` (`daemon.ts`) prepends the bundled binary's
+  directory to the integrated terminals' PATH **only when it was the
+  source we resolved** — i.e. only when there is no real CLI to shadow.
+  It is prepended *first*, so RTK's, Headroom's and TokenSave's dirs (and
+  any real `claude`) still come out ahead of it. This is what makes
+  `claude` runnable in a VS Code terminal on an extension-only machine.
+
+### Why `headroom wrap` is not used
+
+`headroom wrap <tool>` is a **session launcher**, not a config patcher:
+per `--help`, it "starts a Headroom proxy, configures the environment,
+and launches the target tool", all ephemeral. Persistent config writes
+come from `headroom install apply` (`--scope provider|user|system
+--target claude`) instead. Verified empirically against headroom-ai
+0.35.0:
+
+- with no `claude` on the PATH it exits 1 printing `Error: 'claude' not
+  found in PATH.` **on stdout** (which `runCapture` deliberately
+  captures — see its comment), and touches **no files** (mtime + md5
+  unchanged on `~/.claude.json` and `~/.claude/settings.json`);
+- on the success path it starts a *competing* proxy on 8787, installs
+  Serena via uvx, and launches an interactive session that dies
+  instantly under the extension's `stdio: ['ignore','pipe','pipe']`
+  (Claude Code falls back to `--print` with stdin closed and exits 1).
+
+So the old `ensureHeadroomWrapped` was wrong on both paths, and worse:
+its throw aborted the rest of `activate()`'s Headroom block —
+`ensureHeadroomMcpInstalled` and `daemon.ensureRunning` never ran — while
+`applyEnvironment()` sits *outside* that try/catch and still pointed
+Claude Code at a proxy that was never started. That is the "half-wrapped"
+state; it is gone.
+
+`headroom wrap vscode-claude` (with `--configure`, "safely add/update
+Claude Code's proxy environment settings") is the semantically right
+command for this case, but both of its halves are already implemented
+better here: `applyEnvironment` writes the per-project `/p/<slug>` URL
+plus the remote proxy token, and `ProxyDaemonManager` runs the proxy
+detached and health-checked rather than in the foreground. Nothing to
+gain by shelling out to it.
 
 ### MCP server registration
 
 `ensureHeadroomMcpInstalled` (`headroom.ts`) runs `headroom mcp install
---proxy-url http://127.0.0.1:<localPort>` right after `ensureHeadroomWrapped`,
-local mode only. Unlike `headroom wrap claude`, this one is **not** gated
+--proxy-url http://127.0.0.1:<localPort>` right after the binary is
+confirmed present, local mode only. It is **not** gated
 behind our own idempotency check — deliberately, because `headroom mcp
 install` is already non-destructive by itself: if a `claude` (or other
 detected agent) registration already exists and differs from what would be
@@ -644,14 +807,26 @@ would both try to bind the same port and collide.
   `<remoteUrl>/p/<slug>` (remote). This lets Headroom's dashboard
   break down usage per project even though local mode uses one shared
   process.
+  - **One mutator per variable — `prepend` overwrites, it does not
+    stack.** `vscode.d.ts` is explicit: "an extension can only make a
+    single change to any one variable, so this will overwrite any
+    previous calls to replace, append or prepend". `applyEnvironment`
+    originally called `collection.prepend('PATH', ...)` once per tool
+    (rtk / headroom / tokensave / bundled `claude`), so only the last
+    call survived: `tokensave` resolved in integrated terminals and
+    `rtk` did not, even though `rtk-bin/rtk` existed and was enabled.
+    The dirs are collected into an array and joined into a **single**
+    `prepend` call now; array order is PATH priority order. Never add
+    a second `prepend('PATH', ...)`.
   - **`environmentVariableCollection` alone is not enough.** Confirmed
     empirically: Claude Code's own VS Code extension spawns its CLI
     directly rather than through an integrated terminal, so it never
-    sees that collection at all — and `headroom wrap claude` already
-    wrote a global, slug-less `env.ANTHROPIC_BASE_URL` straight into
-    `~/.claude/settings.json`, which is what a Claude Code session
-    actually uses in that case, showing "No per-project data yet" on
-    the dashboard regardless of `projectName`/workspace name. The fix:
+    sees that collection at all — so a Claude Code session falls back
+    to whatever `env.ANTHROPIC_BASE_URL` sits in
+    `~/.claude/settings.json` (a global, slug-less one is what
+    `headroom install apply --scope user` writes), showing "No
+    per-project data yet" on the dashboard regardless of
+    `projectName`/workspace name. The fix:
     `applyEnvironment` (`daemon.ts`) also mirrors the same
     `/p/<slug>` URL into `.claude/settings.local.json`'s own `env`
     block for the open workspace folder, via `applyProjectEnv` in
@@ -1086,6 +1261,14 @@ still there for anyone who prefers it). Exists because navigating
 User/Remote/Workspace/Folder scopes for 9 settings via the native UI
 is more friction than this extension's needs warrant.
 
+- **Danger zone — "unwrap all"**: a bordered block at the bottom of the
+  tab, rendered as static markup *outside* `#settings-content` (which
+  `renderSettings` overwrites wholesale on every snapshot) and wired up
+  once at load. The button only posts `settings:unwrapAll`; the
+  confirmation is a real modal on the host side, shared with the
+  Command Palette command — see "Uninstall / cleanup". The snapshot is
+  re-posted afterwards, but only if the user actually went through with
+  it, since cleanup changes what the snapshot reports.
 - **Always reachable, unlike the other three tabs**: `tabOrder`
   unconditionally pushes `'settings'` last, and `openDashboard()` no
   longer early-returns when both Headroom and RTK are disabled — it's
@@ -1276,28 +1459,85 @@ case — it drives several requirements above:
     / `easy-headroom.selectTokensaveVersion` — QuickPick of detected
     versions (see "Versioning" under each install section), writes the
     choice to the matching `pinnedVersion` setting, then reinstalls.
-  - `easy-headroom.uninstallCleanup` — see "Uninstall / cleanup" below.
+  - `easy-headroom.uninstallCleanup` (`easy-headroom: Unwrap All
+    (Uninstall / Clean Up)`) — see "Uninstall / cleanup" below.
 
-### Uninstall / cleanup
+### Uninstall / cleanup ("unwrap all")
 
 VS Code gives extensions no reliable hook to intercept actual
 uninstallation (no `onWillUninstall`, no chance to prompt the user at
 that point) — so cleanup can't be automatic when the user clicks
 "Uninstall" in the Extensions view.
 
-- Practical answer: a manual command, `easy-headroom: Uninstall /
-  Clean Up`, documented in the README as a step to run **before**
-  uninstalling the extension if a full cleanup is wanted.
-- Default behavior when invoked: single confirmation prompt, then
-  clean up everything — remove the RTK integration for every agent in
-  `rtk.agents` (Codex's AGENTS.md block is left in place, see
-  "Multi-agent scope"), remove the Headroom wrap from
-  `~/.claude/settings.json`, best-effort `tokensave uninstall --agent
-  claude` (failure here doesn't block the rest of cleanup — the binary
-  is deleted regardless, a stale MCP entry is left for manual removal),
-  delete the downloaded RTK binary, the Headroom venv, and the
-  TokenSave binary from `globalStorageUri`, stop the shared proxy
-  daemon if running.
+- Practical answer: an explicit **"unwrap all"**, reachable from two
+  places that share one implementation (`confirmAndRunCleanup` in
+  `commands.ts` → `runFullCleanup` in `cleanup.ts`):
+  - the command `easy-headroom: Unwrap All (Uninstall / Clean Up)`
+    (`easy-headroom.uninstallCleanup`), and
+  - a danger-zone button at the bottom of the dashboard's **Settings
+    tab** — the discoverable one, since nobody looks in the Command
+    Palette for something they didn't know they had to run.
+  Documented in the README as a step to run **before** uninstalling the
+  extension if a full cleanup is wanted.
+- One modal confirmation, then every step runs independently, each
+  try/caught into the report — a cleanup that aborts halfway is worse
+  than one that says what it couldn't do, since a half-removed state is
+  exactly what causes the two-competing-installs failures this exists to
+  end.
+- **Ordering matters**: MCP unregistration (`tokensave uninstall
+  --agent claude`, best-effort `headroom mcp uninstall`) runs *before*
+  any binary is deleted — the previous implementation deleted the
+  TokenSave binary while git hooks still invoked it.
+- What it removes:
+  - the RTK integration for **every** agent in `ALL_AGENTS`, not just
+    the ones currently in `rtk.agents` (that setting may have been
+    narrowed since an agent was integrated, orphaning its hook);
+  - the managed `env` keys (`ANTHROPIC_BASE_URL`,
+    `HEADROOM_OUTPUT_SHAPER`, `ANTHROPIC_CUSTOM_HEADERS`) from
+    `~/.claude/settings.json` — key-scoped, so the user's own entries
+    in that same block survive. No hook removal here: Headroom never
+    writes hooks, and the `removeHeadroomWrap` that used to strip any
+    hook matching `headroom` would have destroyed a user's own (e.g.
+    the Headroom Claude Code plugin's);
+  - the same managed keys from `.claude/settings.local.json` **in every
+    project this extension has touched**, and the TokenSave git hooks
+    from each of them (see the touched-projects registry below);
+  - the TokenSave MCP registration;
+  - everything under `globalStorageUri`: the RTK binary, the Headroom
+    venv, the TokenSave binary, both version markers, the proxy lock,
+    log and client-heartbeat dir;
+  - the RTK/TokenSave reporting state files (instance id, last-pushed
+    id), which deliberately live *outside* `globalStorageUri` and were
+    previously missed entirely;
+  - the shared proxy daemon is stopped first.
+- What it deliberately leaves, reported as "left for you" rather than
+  deleted:
+  - a copy of RTK or TokenSave **installed on the machine by the user**
+    — found via `findOnPath`, named in the report, never removed: it
+    isn't ours;
+  - `~/.codex/AGENTS.md` + `RTK.md` (no safe machine-parseable boundary
+    in free-form markdown — see "Multi-agent scope") and
+    `~/.gemini/GEMINI.md` + its hook script;
+  - real user data: each project's `.tokensave/` index,
+    `~/.tokensave/global.db`, RTK's `history.db`.
+- The report (`CleanupReport { done, manual, errors }`) goes to the
+  output channel via `formatCleanupReport`; the toast is a one-line
+  count with a "Show Details" action. The manual-leftovers list is the
+  part that actually matters and is far too long for a notification.
+
+#### Touched-projects registry
+
+Cleanup has to reach every project the extension wrote per-project
+state into (`.claude/settings.local.json`, `.git/hooks/*`), not just
+the window it happens to be invoked from — otherwise unwrapping from
+project B leaves project A pointed at a dead proxy and syncing an index
+that no longer exists. `projects.ts` keeps a plain JSON list of project
+roots in `globalStorageUri/touched-projects.json`, appended on every
+activation (`recordTouchedProject`, best-effort — a failure there must
+never break setup) and cleared by the cleanup itself. Plain file rather
+than `context.globalState` for the same reason as the version markers
+and the proxy lock: it holds nothing but paths and being inspectable on
+disk matches the rest of this extension's state.
 
 ### Security / practices to follow
 
@@ -1351,9 +1591,6 @@ placeholder.
 
 ## Open questions / to verify during implementation
 
-- Confirm the exact behavior of `headroom wrap claude` (which files it
-  touches precisely) before calling it automatically from the
-  extension, so it never clobbers an existing config.
 - Whether `headroom proxy` has a native idle-shutdown flag — if it
   does, it could replace/simplify the heartbeat-based reaper described
   in "`headroom proxy` daemon lifecycle".
@@ -1361,6 +1598,12 @@ placeholder.
   correctly for every API path it proxies (not just verified for the
   happy path), and how it behaves if the slug is empty/unset (no
   workspace open).
+
+Resolved: `headroom wrap claude` is never called by the extension. It
+is a session launcher, it writes no config, it fails without a `claude`
+on the PATH, and its useful half is already covered by
+`applyEnvironment` + `ProxyDaemonManager` — see "Why `headroom wrap` is
+not used" above for the full empirical write-up.
 
 Resolved: `headroom-ai` is also published on PyPI (confirmed, same
 version as the latest GitHub release) — install is a plain
@@ -1396,9 +1639,10 @@ Resolved: both RTK and Headroom default to `latest` (rate-limit-safe
 stable URL for RTK, plain PyPI resolution for Headroom); a per-tool
 `pinnedVersion` setting plus a "Select Version" command allow pinning
 a specific detected version — see "Versioning" under each install
-section. Uninstall cleanup is a manual command
-(`easy-headroom.uninstallCleanup`, since VS Code has no uninstall
-hook), defaulting to a full cleanup after one confirmation. Activation
+section. Uninstall cleanup is an explicit "unwrap all" (since VS Code
+has no uninstall hook), reachable both from the Command Palette
+(`easy-headroom.uninstallCleanup`) and from a danger-zone button in the
+Settings tab, doing a full cleanup after one confirmation. Activation
 is `onStartupFinished`; the full command list is now enumerated under
 "`contributes.commands` and activation".
 
@@ -1438,6 +1682,20 @@ what F5's Extension Development Host runs. `npm run package`
 locally built extension host identifies itself as `0.6.0-dev` in the
 status bar tooltip while the published one says `0.6.0`, and the
 suffix can't reach a commit or a vsix by construction.
+
+**A vsix built for local install must be a dev build too** — use
+`npm run package:dev`, never a bare `vsce package`. `vsce package`
+always runs `vscode:prepublish` (hence `--production`), so a
+hand-packaged vsix installed into the local server is byte-for-byte
+indistinguishable from a Marketplace one: same version in the tooltip,
+same filename. `package:dev` closes that hole from both ends — it sets
+`EH_DEV_BUILD=1`, which `esbuild.js` uses to override `--production`
+back to a dev build, and it passes `--out easy-headroom-<version>-dev.vsix`
+so the artifact on disk is labelled as well. Only the vsix *manifest*
+version stays plain `x.y.z` (vsce reads it straight from package.json,
+and the rule above says that file never carries the suffix), so the
+Extensions pane shows `0.6.1` either way — the tooltip and the
+filename are what tell a local build apart.
 
 This replaces an earlier scheme where `package.json` itself carried
 the `-dev` suffix and the publish script stripped/restored it. That

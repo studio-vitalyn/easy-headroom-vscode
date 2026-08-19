@@ -48,3 +48,25 @@ export async function listHeadroomReleases(): Promise<string[]> {
   const info = (await res.json()) as PyPiPackageInfo;
   return Object.keys(info.releases).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
 }
+
+export const RTK_REPO = 'rtk-ai/rtk';
+export const TOKENSAVE_REPO = 'aovestdipaperino/tokensave';
+
+/**
+ * Single `GET /releases/latest` — the cheap counterpart to the paginated pickers above. Those exist
+ * to populate a dropdown the user explicitly opened; this one runs unattended on a 24h cadence
+ * (see systemUpdates.ts), so it has to cost exactly one unauthenticated request. Returns undefined
+ * rather than throwing on any failure: a staleness *hint* is never worth surfacing an error for.
+ */
+export async function latestRelease(repo: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+      headers: { Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) return undefined;
+    const release = (await res.json()) as GitHubRelease;
+    return release.tag_name || undefined;
+  } catch {
+    return undefined;
+  }
+}

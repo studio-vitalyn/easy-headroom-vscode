@@ -1,12 +1,7 @@
 import * as vscode from 'vscode';
 import { config } from './config';
 import { ensureRtkInstalled, ensureRtkInitialized, RtkInitFailure } from './rtk';
-import {
-  ensureHeadroomInstalled,
-  ensureHeadroomWrapped,
-  ensureHeadroomMcpInstalled,
-  runHeadroomLearn,
-} from './headroom';
+import { ensureHeadroomInstalled, ensureHeadroomMcpInstalled, runHeadroomLearn } from './headroom';
 import {
   ensureTokensaveInstalled,
   ensureTokensaveMcpInstalled,
@@ -16,12 +11,15 @@ import {
   TokensaveIndexFailure,
 } from './tokensave';
 import { ProxyDaemonManager } from './daemon';
+import { findClaudeClient } from './claudeBinary';
 import { ActivationIndicator, HeadroomStatusBar } from './statusBar';
 import { RtkReportingWatcher } from './rtkReporting';
 import { TokensaveReportingWatcher } from './tokensaveReporting';
 import { UpdateCheckTimer } from './updateCheck';
 import { EXTENSION_VERSION } from './buildInfo';
 import { registerCommands } from './commands';
+import { recordTouchedProject } from './projects';
+import { checkSystemBinaries } from './systemUpdates';
 import { formatError } from './errors';
 import { outputChannel, log } from './log';
 
@@ -36,6 +34,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(outputChannel);
   daemon = new ProxyDaemonManager(context);
   registerCommands(context, daemon);
+
+  // The full cleanup has to reach every project this extension ever wrote hooks or env into, not
+  // just the one open right now — nothing else records that, and a failure here must never take
+  // setup down with it.
+  void recordTouchedProject(context).catch((err) => log(`Could not record this project: ${formatError(err)}`));
 
   // Runs for the whole setup below — see ActivationIndicator for why it exists. Registered for
   // disposal too, so a throw anywhere in activate() can't leave it spinning forever.
@@ -66,6 +69,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   if (config.headroomEnabled()) {
+    // Headroom can only ever *redirect* an existing Claude Code client — ANTHROPIC_BASE_URL routes
+    // nothing if there is nothing to route. Checked before the mode split (remote gets the same env
+    // block) and outside the try below, since nothing else in the setup depends on it.
+    const claudeClient = await findClaudeClient();
+    if (claudeClient) {
+      log(
+        `Claude Code client: ${claudeClient.binPath} (${
+          claudeClient.source === 'path' ? 'on the PATH' : 'bundled with the VS Code extension'
+        })`
+      );
+    } else {
+      log('No Claude Code client found — neither `claude` on the PATH nor the Claude Code VS Code extension');
+      void vscode.window.showWarningMessage(
+        'easy-headroom: no Claude Code client found — install the Claude Code extension (or the `claude` CLI) for Headroom routing to have any effect.'
+      );
+    }
+
     try {
       if (config.mode() === 'local') {
         const headroom = await ensureHeadroomInstalled(context);
@@ -76,7 +96,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           );
         } else {
           log(`Headroom ready at ${headroom.binPath}`);
-          await ensureHeadroomWrapped(headroom.binPath);
           await ensureHeadroomMcpInstalled(headroom.binPath);
           await daemon.ensureRunning(headroom.binPath, { forceRestart: headroom.updated });
 
@@ -147,6 +166,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   statusBar.start();
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
+
+  // Fire-and-forget: a staleness hint must never sit in front of a window finishing activation.
+  // Only reports on binaries we deferred to rather than installed — see `checkSystemBinaries`.
+  void checkSystemBinaries(context, { rtk: rtkBinPath, tokensave: tokensaveBinPath })
+    .then(() => statusBar?.refresh())
+    .catch((err) => log(`System update check failed — ${formatError(err)}`));
 
   updateCheckTimer = new UpdateCheckTimer(context, daemon, rtkBinPath, () => void statusBar?.refresh());
   updateCheckTimer.start();

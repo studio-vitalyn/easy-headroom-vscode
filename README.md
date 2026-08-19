@@ -2,7 +2,7 @@
 
 ![easyHeadroom](https://raw.githubusercontent.com/studio-vitalyn/easy-headroom-vscode/main/assets/splash.png)
 
-Stop hand-rolling your `rtk init`, `headroom wrap claude`, and
+Stop hand-rolling your `rtk init`, Headroom proxy, and
 `tokensave init` setup.
 **easyHeadroom** is a VS Code extension that installs and configures
 [RTK](https://github.com/rtk-ai/rtk),
@@ -21,8 +21,10 @@ API call, and codebase-exploration query.
   `ANTHROPIC_BASE_URL` at itself. TokenSave registers itself as an MCP
   server and indexes every open workspace folder, so code-graph
   lookups replace token-hungry grep/Explore-agent searches.
-- **Wires up the hooks** (`rtk init --global --auto-patch`, `headroom wrap claude`)
-  safely — won't re-patch your config on every restart.
+- **Wires up the hooks** (`rtk init --global --auto-patch`) safely — won't
+  re-patch your config on every restart — and points Claude Code at the
+  Headroom proxy per project, whether you use the Claude Code VS Code
+  extension or the standalone `claude` CLI.
 - **Works on one host or several.** Use it standalone on your laptop, or
   point it at a centralized Headroom instance to aggregate RTK savings
   across every host — see [`easy-headroom-docker`](https://github.com/studio-vitalyn/easy-headroom-docker)
@@ -93,8 +95,8 @@ shared dashboard.
 
 I was tired of installing and wiring up RTK, Headroom, and TokenSave by
 hand on every project, and on every container/host I worked on — `rtk
-init --global`, `headroom wrap claude`, `tokensave init`, PATH
-management, env vars, repeated every single time. All three are
+init --global`, Headroom proxy and env vars, `tokensave init`, PATH
+management, repeated every single time. All three are
 excellent, independent tools, but none ships a one-click setup, and
 none is designed for a Headroom instance shared across multiple
 machines. This extension automates the former and enables the latter,

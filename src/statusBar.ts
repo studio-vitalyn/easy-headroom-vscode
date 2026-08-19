@@ -5,6 +5,7 @@ import { checkHealth, fetchRemoteHeadroomVersion } from './daemon';
 import { RtkInitFailure } from './rtk';
 import { TokensaveIndexFailure, getInstalledTokensaveVersion } from './tokensave';
 import { getInstalledHeadroomVersion } from './headroom';
+import { knownUpdate } from './systemUpdates';
 import { log } from './log';
 
 const SPARKLINE_CHARS = '▁▂▃▄▅▆▇█';
@@ -99,7 +100,7 @@ async function readRtkGain(rtkBinPath: string | undefined): Promise<RtkGainSumma
       let out = '';
       child.stdout.on('data', (d) => (out += d.toString()));
       child.on('error', reject);
-      child.on('exit', (code) => (code === 0 ? resolve(out) : reject(new Error(`rtk gain exited ${code}`))));
+      child.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(`rtk gain exited ${code}`))));
     });
     return JSON.parse(output) as RtkGainSummary;
   } catch {
@@ -125,7 +126,7 @@ async function readRtkVersion(rtkBinPath: string | undefined): Promise<string | 
       child.stdout.on('data', (d) => (out += d.toString()));
       child.stderr.on('data', (d) => (err += d.toString()));
       child.on('error', reject);
-      child.on('exit', (code) =>
+      child.on('close', (code) =>
         code === 0 ? resolve(out) : reject(new Error(`rtk --version exited ${code}: ${err.trim() || out.trim()}`))
       );
     });
@@ -138,6 +139,17 @@ async function readRtkVersion(rtkBinPath: string | undefined): Promise<string | 
     log(`RTK version not shown in tooltip — ${(err as Error).message}`);
     return undefined;
   }
+}
+
+/**
+ * Appended next to a tool's version when the copy in use is one the user installed themselves and a
+ * newer release exists. Only ever a hint: the extension doesn't upgrade a binary it doesn't own
+ * (see systemUpdates.ts), so the tooltip is where that fact stays visible after the one-shot
+ * notification has been dismissed.
+ */
+function updateSuffix(tool: 'rtk' | 'tokensave'): string {
+  const update = knownUpdate(tool);
+  return update ? ` — ⬆️ v${update.latest} available` : '';
 }
 
 export class HeadroomStatusBar {
@@ -172,7 +184,7 @@ export class HeadroomStatusBar {
     const [rtkVersion, headroomVersion, tokensaveVersion, headroomRemoteVersion] = await Promise.all([
       readRtkVersion(this.rtkBinPath),
       getInstalledHeadroomVersion(this.context),
-      this.tokensaveBinPath ? getInstalledTokensaveVersion(this.context) : Promise.resolve(undefined),
+      this.tokensaveBinPath ? getInstalledTokensaveVersion(this.context, this.tokensaveBinPath) : Promise.resolve(undefined),
       config.headroomEnabled() && config.mode() === 'remote' && remoteUrl
         ? fetchRemoteHeadroomVersion(remoteUrl)
         : Promise.resolve(undefined),
@@ -234,6 +246,7 @@ export class HeadroomStatusBar {
       // Always show *something* here rather than silently omitting it — "(version unknown)"
       // points at the Output channel instead of leaving an unexplained gap next to "enabled".
       md.appendMarkdown(rtkVersion ? ` (v${rtkVersion})` : ' (version unknown — see "easy-headroom" output log)');
+      md.appendMarkdown(updateSuffix('rtk'));
     }
     if (this.rtkFailures.length > 0) {
       const list = this.rtkFailures.map((f) => `${f.agent} (${f.error.message})`).join(', ');
@@ -272,6 +285,9 @@ export class HeadroomStatusBar {
     const tokensaveVersion = stripV(versions?.tokensaveVersion);
     if (config.tokensaveEnabled() && tokensaveVersion) {
       md.appendMarkdown(` (v${tokensaveVersion})`);
+    }
+    if (config.tokensaveEnabled()) {
+      md.appendMarkdown(updateSuffix('tokensave'));
     }
     if (this.tokensaveFailures.length > 0) {
       const list = this.tokensaveFailures.map((f) => `${f.folder} (${f.error.message})`).join(', ');

@@ -4,7 +4,6 @@ import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { config } from './config';
 import { storagePaths } from './paths';
-import { isHeadroomWrapped } from './claudeSettings';
 import { listHeadroomReleases } from './versions';
 
 async function pathExists(p: string): Promise<boolean> {
@@ -28,7 +27,9 @@ function runCapture(bin: string, args: string[]): Promise<{ code: number | null;
     child.stdout.on('data', (d) => (stdout += d.toString()));
     child.stderr.on('data', (d) => (stderr += d.toString()));
     child.on('error', reject);
-    child.on('exit', (code) => {
+    // 'close', not 'exit': 'exit' fires as soon as the process is gone, which can beat the last
+    // stdout 'data' events and hand back truncated (or empty) output for a fast-exiting command.
+    child.on('close', (code) => {
       if (code === 0) {
         resolve({ code, stdout });
       } else {
@@ -62,7 +63,7 @@ async function isWindowsStorePythonStub(bin: string): Promise<boolean> {
       let out = '';
       child.stdout.on('data', (d) => (out += d.toString()));
       child.on('error', reject);
-      child.on('exit', () => resolve(out));
+      child.on('close', () => resolve(out));
     });
     return output.toLowerCase().includes('windowsapps');
   } catch {
@@ -84,7 +85,7 @@ async function pythonVersionAtLeastMin(bin: string): Promise<boolean> {
       let out = '';
       child.stdout.on('data', (d) => (out += d.toString()));
       child.on('error', reject);
-      child.on('exit', (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`exit ${code}`))));
+      child.on('close', (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`exit ${code}`))));
     });
     const [major, minor] = output.split('.').map(Number);
     return major > MIN_PYTHON[0] || (major === MIN_PYTHON[0] && minor >= MIN_PYTHON[1]);
@@ -242,12 +243,6 @@ export async function ensureHeadroomInstalled(
   });
 
   return { binPath: paths.headroomBinPath, updated: true };
-}
-
-/** Idempotent: only runs `headroom wrap claude` if ~/.claude/settings.json doesn't already reference it. */
-export async function ensureHeadroomWrapped(headroomBinPath: string): Promise<void> {
-  if (await isHeadroomWrapped()) return;
-  await run(headroomBinPath, ['wrap', 'claude']);
 }
 
 /**

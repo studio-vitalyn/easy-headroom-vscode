@@ -2,6 +2,29 @@
 
 All notable changes to the easy-headroom extension are documented here.
 
+## 0.6.1
+
+### Fixed
+- Integrated terminals only had the last-registered tool on their `PATH`. VS Code keeps a
+  single mutator per environment variable, so the four separate `prepend('PATH', ...)` calls
+  overwrote each other and `rtk` (and, in local mode, `headroom`) were missing from every
+  terminal. All directories are now prepended in one call.
+- `rtk --version` and the other version/stat probes could return truncated or empty output —
+  they resolved on the child process's `exit` event, which can fire before `stdout` has
+  drained. The RTK version is shown in the status bar tooltip again.
+- **A failed or partial TokenSave upgrade no longer looks permanently successful.** The version marker was written without checking what actually landed, so a marker claiming `v7.9.0` next to a binary reporting `7.8.1` stayed that way forever — both the status bar and the 24h update gate believed it. The binary is asked its version first now; a mismatch leaves the marker untouched and the next activation retries.
+- **Headroom no longer needs the standalone `claude` CLI.** Setup ran `headroom wrap claude`, which fails outright when `claude` isn't on the PATH — the normal case now that the Claude Code VS Code extension installs in one click and the CLI doesn't. The failure aborted the rest of Headroom's setup (MCP registration, proxy daemon) while the env vars pointing Claude Code at that proxy were still written, leaving sessions routed to a port with nothing listening on it. That call is gone: `headroom wrap` is a session launcher that writes no config, and everything it would have configured is already done, per project, by the extension's own env handling and proxy daemon.
+- **`claude` is now on the PATH in integrated terminals** when the Claude Code extension is your only install. The extension bundles the CLI but keeps it to itself; easy-headroom puts that copy on the PATH — behind your own `claude` if you have one.
+
+### Added
+- **Update notices for `rtk` and `tokensave`** in the Settings tab, when the tool you are running is one you installed yourself rather than a copy the extension manages. One unauthenticated GitHub request per tool per day; the notice offers the upgrade command (copied to the clipboard) where the tool has one, and the release notes otherwise.
+- **A warning when no Claude Code client is found at all** (neither the extension nor a `claude` on the PATH) while Headroom is enabled, in both local and remote mode — Headroom can only redirect a client that exists.
+
+### Changed
+- **An `rtk` or `tokensave` already on your PATH is now used as-is**, instead of the extension downloading a second copy beside it. Two installs of the same tool sharing one on-disk state — a `.tokensave/tokensave.db`, an MCP registration pointing at an absolute path while a hook resolves the name through PATH — is a real failure mode, not a tidiness concern, so the extension's own copy is removed when a system one appears. Pinning a version in the settings is explicit intent to run that build and keeps the managed copy.
+- **"Unwrap all" now reaches every project the extension has touched**, not just the window you run it from. Each project it writes per-project state into (the `.claude/settings.local.json` env block, the TokenSave git hooks) is recorded, so uninstalling from one project no longer leaves another pointed at a proxy that is gone. The command is named "easy-headroom: Unwrap All (Uninstall / Clean Up)" in the Command Palette.
+- **"Unwrap all" no longer touches hooks in `~/.claude/settings.json`.** It removed any hook mentioning `headroom`, which would have deleted one of your own (the Headroom Claude Code plugin's, for instance); the extension never wrote a hook there in the first place. It still removes the managed `env` keys it did write.
+
 ## 0.5.0
 
 ### Fixed

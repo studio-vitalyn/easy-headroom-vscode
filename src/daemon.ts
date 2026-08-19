@@ -7,6 +7,8 @@ import { config } from './config';
 import { storagePaths } from './paths';
 import { projectSlug } from './slug';
 import { applyProjectEnv, clearProjectEnv } from './claudeSettings';
+import { pathExists } from './archive';
+import { findClaudeClient } from './claudeBinary';
 
 const HEARTBEAT_INTERVAL_MS = 45_000;
 const REAPER_INTERVAL_MS = 3 * 60_000;
@@ -101,14 +103,39 @@ export class ProxyDaemonManager {
     const collection = this.context.environmentVariableCollection;
     collection.clear();
 
-    if (config.rtkEnabled()) {
-      collection.prepend('PATH', this.paths.rtkBinDir + path.delimiter);
+    // **One `prepend` call, not four.** `EnvironmentVariableCollection` holds a single mutator per
+    // variable: "an extension can only make a single change to any one variable, so this will
+    // overwrite any previous calls to replace, append or prepend" (vscode.d.ts). Four successive
+    // `prepend('PATH', ...)` calls therefore left only the last one in effect — `rtk` was missing
+    // from every integrated terminal while `tokensave` (prepended last) was there. Collect the dirs
+    // and join them into one value instead; order within it is the PATH priority order.
+    const pathDirs: string[] = [];
+
+    // Each dir is only added if it actually exists. Two cases make that matter: we may have
+    // deferred to a system install and never created ours (see `findOnPath`), and the full cleanup
+    // deletes these dirs — in both, prepending a dead path either shadows the real binary with
+    // nothing or leaves a stale entry pointing at a deleted install.
+    if (config.rtkEnabled() && (await pathExists(this.paths.rtkBinDir))) {
+      pathDirs.push(this.paths.rtkBinDir);
     }
-    if (config.headroomEnabled() && config.mode() === 'local') {
-      collection.prepend('PATH', path.dirname(this.paths.headroomBinPath) + path.delimiter);
+    const headroomBinDir = path.dirname(this.paths.headroomBinPath);
+    if (config.headroomEnabled() && config.mode() === 'local' && (await pathExists(headroomBinDir))) {
+      pathDirs.push(headroomBinDir);
     }
-    if (config.tokensaveEnabled()) {
-      collection.prepend('PATH', this.paths.tokensaveBinDir + path.delimiter);
+    if (config.tokensaveEnabled() && (await pathExists(this.paths.tokensaveBinDir))) {
+      pathDirs.push(this.paths.tokensaveBinDir);
+    }
+
+    // The Claude Code extension keeps its bundled CLI to itself, so `claude` is missing from
+    // integrated terminals unless the user also installed the standalone CLI. Put that copy back on
+    // the PATH when it is the only one we found — last, so it stays the lowest-priority entry.
+    const claudeClient = await findClaudeClient();
+    if (claudeClient?.source === 'extension') {
+      pathDirs.push(path.dirname(claudeClient.binPath));
+    }
+
+    if (pathDirs.length) {
+      collection.prepend('PATH', pathDirs.join(path.delimiter) + path.delimiter);
     }
 
     const managedKeys = ['ANTHROPIC_BASE_URL', 'HEADROOM_OUTPUT_SHAPER', 'ANTHROPIC_CUSTOM_HEADERS'];

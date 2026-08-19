@@ -25,11 +25,14 @@ export function codexAgentsMdPath(): string {
  * distinct from `claudeSettingsPath()` (global `~/.claude/settings.json`). Conventionally
  * gitignored, so per-project/per-machine values (like a local proxy port) belong here rather than
  * in the shared, committed `.claude/settings.json`. Undefined if no workspace folder is open.
+ *
+ * `root` overrides the open workspace folder — needed by the full cleanup, which has to reach every
+ * project this extension has ever written env into, not just the one currently open.
  */
-export function projectClaudeSettingsLocalPath(): string | undefined {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) return undefined;
-  return path.join(folder.uri.fsPath, '.claude', 'settings.local.json');
+export function projectClaudeSettingsLocalPath(root?: string): string | undefined {
+  const base = root ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!base) return undefined;
+  return path.join(base, '.claude', 'settings.local.json');
 }
 
 export function rtkHistoryDbPath(): string {

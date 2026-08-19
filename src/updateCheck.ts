@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import { config } from './config';
 import { ProxyDaemonManager } from './daemon';
-import { ensureHeadroomInstalled, ensureHeadroomWrapped, ensureHeadroomMcpInstalled, runHeadroomLearn } from './headroom';
+import { ensureHeadroomInstalled, ensureHeadroomMcpInstalled, runHeadroomLearn } from './headroom';
 import { ensureTokensaveInstalled, ensureTokensaveMcpInstalled } from './tokensave';
+import { checkSystemBinaries } from './systemUpdates';
 import { formatError } from './errors';
 import { log } from './log';
 
@@ -33,8 +34,9 @@ export class UpdateCheckTimer {
   ) {}
 
   private async tick(): Promise<void> {
+    let tokensaveBinPath: string | undefined;
     try {
-      const tokensaveBinPath = await ensureTokensaveInstalled(this.context);
+      tokensaveBinPath = await ensureTokensaveInstalled(this.context);
       if (tokensaveBinPath) {
         await ensureTokensaveMcpInstalled(tokensaveBinPath);
       }
@@ -42,12 +44,16 @@ export class UpdateCheckTimer {
       log(`TokenSave update check failed — ${formatError(err)}`);
     }
 
+    // The `ensure*` calls above only keep *our own* copies current; a binary we deferred to on the
+    // user's PATH is never touched, so its staleness has to be checked separately (24h-gated
+    // internally, same as the marker files).
+    await checkSystemBinaries(this.context, { rtk: this.rtkBinPath, tokensave: tokensaveBinPath });
+
     if (config.headroomEnabled() && config.mode() === 'local') {
       try {
         const headroom = await ensureHeadroomInstalled(this.context);
         if (headroom?.updated) {
           log(`Headroom upgraded — restarting the proxy daemon`);
-          await ensureHeadroomWrapped(headroom.binPath);
           await ensureHeadroomMcpInstalled(headroom.binPath);
           await this.daemon.ensureRunning(headroom.binPath, { forceRestart: true });
           if (config.rtkEnabled() && this.rtkBinPath) {

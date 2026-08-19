@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import * as tar from 'tar';
 import { config } from './config';
 import { storagePaths } from './paths';
-import { pathExists, download, extractZipWindows, findBinaryRecursive } from './archive';
+import { pathExists, download, extractZipWindows, findBinaryRecursive, findOnPath } from './archive';
 
 const REPO = 'aovestdipaperino/tokensave';
 
@@ -73,10 +73,33 @@ async function writeVersionMarker(file: string, marker: VersionMarker): Promise<
   await fs.writeFile(file, JSON.stringify(marker), 'utf8');
 }
 
-/** For the status bar tooltip — reads the marker written by the last successful install. */
-export async function getInstalledTokensaveVersion(context: vscode.ExtensionContext): Promise<string | undefined> {
+/**
+ * Asks the binary itself what it is (`tokensave --version` → `tokensave 7.9.0`). Used both to
+ * verify a fresh install actually landed and to report a *system* binary's version, which has no
+ * marker file of ours to read.
+ */
+async function readBinaryVersion(binPath: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await runCapture(binPath, ['--version']);
+    return stdout.trim().split(/\s+/).pop();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * For the status bar tooltip — reads the marker written by the last successful install, falling
+ * back to asking the binary directly when there is no marker (i.e. we deferred to a system install,
+ * see `ensureTokensaveInstalled`).
+ */
+export async function getInstalledTokensaveVersion(
+  context: vscode.ExtensionContext,
+  binPath?: string
+): Promise<string | undefined> {
   const marker = await readVersionMarker(storagePaths(context).tokensaveVersionFile);
-  return marker?.installedVersion;
+  if (marker?.installedVersion) return marker.installedVersion;
+  if (!binPath) return undefined;
+  return readBinaryVersion(binPath);
 }
 
 async function installVersion(paths: ReturnType<typeof storagePaths>, version: string): Promise<void> {
@@ -114,6 +137,16 @@ async function installVersion(paths: ReturnType<typeof storagePaths>, version: s
     await fs.rm(tmpFile, { force: true });
   }
 
+  // Verify what actually landed before recording it. The marker drives both the 24h update gate and
+  // the status bar's version display, so writing it blind means a failed/partial replacement shows
+  // up as a successful upgrade forever after — observed in practice as a marker claiming v7.9.0 next
+  // to a binary reporting 7.8.1. Throwing here leaves the marker untouched, so the next activation
+  // simply retries instead of believing it is already up to date.
+  const actual = await readBinaryVersion(paths.tokensaveBinPath);
+  if (actual && actual !== version.replace(/^v/, '')) {
+    throw new Error(`tokensave ${version} was installed but the binary reports ${actual}`);
+  }
+
   await writeVersionMarker(paths.tokensaveVersionFile, { installedVersion: version, lastCheckedAt: Date.now() });
 }
 
@@ -127,6 +160,21 @@ export async function ensureTokensaveInstalled(context: vscode.ExtensionContext)
 
   const paths = storagePaths(context);
   const pinned = config.tokensavePinnedVersion();
+
+  // Prefer a copy the user already has on their PATH, and drop our own so the two can't coexist —
+  // see `findOnPath`. This is the fix for a genuine failure mode, not just tidiness: the MCP
+  // registration points at an absolute path while the Claude Code hooks resolve `tokensave` through
+  // PATH, so two installs of different versions ended up driving the same `.tokensave/tokensave.db`
+  // concurrently. A pinned version is explicit intent to run *that* build, so it keeps our copy.
+  if (!pinned) {
+    const system = await findOnPath('tokensave', paths.root);
+    if (system) {
+      await fs.rm(paths.tokensaveBinDir, { recursive: true, force: true });
+      await fs.rm(paths.tokensaveVersionFile, { force: true });
+      return system;
+    }
+  }
+
   const alreadyInstalled = await pathExists(paths.tokensaveBinPath);
 
   if (alreadyInstalled) {
@@ -171,7 +219,7 @@ export function runCapture(bin: string, args: string[], cwd?: string): Promise<{
     child.stdout.on('data', (d) => (stdout += d.toString()));
     child.stderr.on('data', (d) => (stderr += d.toString()));
     child.on('error', reject);
-    child.on('exit', (code) => {
+    child.on('close', (code) => {
       if (code === 0) {
         resolve({ stdout });
       } else {
@@ -233,6 +281,21 @@ function hookScript(tokensaveBinPath: string, cwd: string): string {
 }
 
 /**
+ * The root's own `.git` must be a real directory — a submodule working dir has a `.git` *file*
+ * instead, pointing at `.git/modules/<name>` in the superproject, and is deliberately left alone.
+ */
+async function gitHooksDir(root: string): Promise<string | undefined> {
+  const gitDir = path.join(root, '.git');
+  try {
+    const stat = await fs.stat(gitDir);
+    if (!stat.isDirectory()) return undefined;
+  } catch {
+    return undefined;
+  }
+  return path.join(gitDir, 'hooks');
+}
+
+/**
  * Best-effort, project-root workspace folder only — the extension has no submodule awareness, so
  * this never walks into subdirectories looking for nested `.git`s. The root folder's own `.git`
  * must be a real directory (a submodule working dir has a `.git` *file* instead, pointing
@@ -244,15 +307,8 @@ export async function installTokensaveGitHooks(tokensaveBinPath: string): Promis
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) return;
   const cwd = folder.uri.fsPath;
-  const gitDir = path.join(cwd, '.git');
-  try {
-    const stat = await fs.stat(gitDir);
-    if (!stat.isDirectory()) return;
-  } catch {
-    return;
-  }
-
-  const hooksDir = path.join(gitDir, 'hooks');
+  const hooksDir = await gitHooksDir(cwd);
+  if (!hooksDir) return;
   await fs.mkdir(hooksDir, { recursive: true });
   for (const hookName of HOOKED_GIT_EVENTS) {
     const hookFile = path.join(hooksDir, hookName);
@@ -269,6 +325,55 @@ export async function installTokensaveGitHooks(tokensaveBinPath: string): Promis
     await fs.writeFile(hookFile, next, 'utf8');
     await fs.chmod(hookFile, 0o755);
   }
+}
+
+/**
+ * Counterpart to `installTokensaveGitHooks`, used by the full cleanup — excises only our own
+ * marker-guarded block and leaves any hook content the user wrote around it intact. A file that
+ * held nothing but our block (shebang included) is deleted outright rather than left as an empty
+ * executable git would still run on every commit.
+ */
+export async function removeTokensaveGitHooks(root: string): Promise<void> {
+  const hooksDir = await gitHooksDir(root);
+  if (!hooksDir) return;
+
+  for (const hookName of HOOKED_GIT_EVENTS) {
+    const hookFile = path.join(hooksDir, hookName);
+    let existing: string;
+    try {
+      existing = await fs.readFile(hookFile, 'utf8');
+    } catch {
+      continue;
+    }
+    const stripped = stripHookBlock(existing);
+    if (stripped === undefined) continue;
+
+    if (stripped === '' || /^#![^\n]*$/.test(stripped)) {
+      await fs.rm(hookFile, { force: true });
+    } else {
+      await fs.writeFile(hookFile, `${stripped}\n`, 'utf8');
+    }
+  }
+}
+
+/**
+ * Returns the file content without our block, or `undefined` if the marker isn't there at all.
+ * The block is `[shebang] marker … fi` — bounded by the marker line above and the `if`/`fi` pair
+ * `hookScript` emits, so nothing outside it is touched.
+ */
+function stripHookBlock(content: string): string | undefined {
+  const lines = content.split('\n');
+  const idx = lines.findIndex((l) => l.trim() === HOOK_MARKER);
+  if (idx === -1) return undefined;
+
+  let start = idx;
+  if (start > 0 && lines[start - 1].startsWith('#!')) start -= 1;
+
+  let end = idx;
+  while (end < lines.length && lines[end].trim() !== 'fi') end += 1;
+  if (end >= lines.length) end = lines.length - 1;
+
+  return [...lines.slice(0, start), ...lines.slice(end + 1)].join('\n').trim();
 }
 
 const SYNC_INTERVAL_MS = 30 * 60 * 1000;

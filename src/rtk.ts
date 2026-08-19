@@ -7,7 +7,7 @@ import * as tar from 'tar';
 import { config } from './config';
 import { storagePaths } from './paths';
 import { AgentId, isRtkIntegrated, rtkInitArgs } from './rtkAgents';
-import { pathExists, download, extractZipWindows, findBinaryRecursive } from './archive';
+import { pathExists, download, extractZipWindows, findBinaryRecursive, findOnPath } from './archive';
 
 const REPO = 'rtk-ai/rtk';
 
@@ -33,6 +33,20 @@ export async function ensureRtkInstalled(context: vscode.ExtensionContext): Prom
   if (!config.rtkEnabled()) return undefined;
 
   const paths = storagePaths(context);
+
+  // Prefer a copy the user already has on their PATH over installing a second one — see
+  // `findOnPath`. Checked *before* our own copy, and our copy is deleted when a system one shows
+  // up, so the two can never coexist: every call site (absolute path here, PATH prepend in
+  // `applyEnvironment`, a hand-typed `rtk` in a terminal) has to resolve to the same build.
+  // A pinned version is explicit intent to run *that* build, so it keeps our sandboxed copy.
+  if (!config.rtkPinnedVersion()) {
+    const system = await findOnPath('rtk', paths.root);
+    if (system) {
+      await fs.rm(paths.rtkBinDir, { recursive: true, force: true });
+      return system;
+    }
+  }
+
   if (await pathExists(paths.rtkBinPath)) {
     return paths.rtkBinPath;
   }
