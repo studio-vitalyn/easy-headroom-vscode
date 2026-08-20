@@ -29,22 +29,82 @@ let reportingWatcher: RtkReportingWatcher | undefined;
 let tokensaveReportingWatcher: TokensaveReportingWatcher | undefined;
 let tokensaveSyncTimer: TokensaveSyncTimer | undefined;
 let updateCheckTimer: UpdateCheckTimer | undefined;
+let activationIndicator: ActivationIndicator | undefined;
+
+/** Serializes setup runs — see `runSetup`. */
+let setupInFlight: Promise<void> | undefined;
+/** The daemon's heartbeat/reaper/watchdog intervals are started once per window, not per setup. */
+let lifecycleStarted = false;
+/** The disposal hooks below belong to module state, so they're registered once, not per setup. */
+let disposablesRegistered = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   context.subscriptions.push(outputChannel);
-  daemon = new ProxyDaemonManager(context);
-  registerCommands(context, daemon);
+  const proxy = new ProxyDaemonManager(context);
+  daemon = proxy;
+  registerCommands(context, proxy, () => runSetup(context, proxy, { rerun: true }));
+
+  await runSetup(context, proxy);
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('easy-headroom')) {
+        void daemon?.applyEnvironment();
+      }
+    })
+  );
+}
+
+/**
+ * Everything an activation does beyond creating the daemon and registering commands. Split out of
+ * `activate()` so `easy-headroom.rerunSetup` can replay it in place: "Unwrap all" is a reset rather
+ * than an off switch, and re-wrapping otherwise meant reloading the window. Every step is
+ * idempotent — the installers check what is already on disk, the MCP registrations and git hooks
+ * are rewritten in place, and `applyEnvironment` clears its collection before rebuilding it — so a
+ * re-run is safe at any point, whether after a cleanup or after a step that failed.
+ *
+ * Concurrent runs would race on the same install directories, so a second caller joins the run
+ * already in flight instead of starting its own.
+ */
+function runSetup(
+  context: vscode.ExtensionContext,
+  proxy: ProxyDaemonManager,
+  opts: { rerun?: boolean } = {}
+): Promise<void> {
+  if (setupInFlight) return setupInFlight;
+  const run = doSetup(context, proxy, opts).finally(() => {
+    setupInFlight = undefined;
+  });
+  setupInFlight = run;
+  return run;
+}
+
+async function doSetup(
+  context: vscode.ExtensionContext,
+  proxy: ProxyDaemonManager,
+  opts: { rerun?: boolean }
+): Promise<void> {
+  if (opts.rerun) log('Re-running setup');
+
+  if (!disposablesRegistered) {
+    disposablesRegistered = true;
+    context.subscriptions.push({ dispose: () => disposeSetupState() });
+  }
+
+  // Torn down before rather than after the work below: these all poll or watch on a timer, and a
+  // re-run replaces every one of them. On the first run they are all undefined.
+  disposeSetupState();
 
   // The full cleanup has to reach every project this extension ever wrote hooks or env into, not
   // just the one open right now — nothing else records that, and a failure here must never take
   // setup down with it.
   void recordTouchedProject(context).catch((err) => log(`Could not record this project: ${formatError(err)}`));
 
-  // Runs for the whole setup below — see ActivationIndicator for why it exists. Registered for
-  // disposal too, so a throw anywhere in activate() can't leave it spinning forever.
-  const activationIndicator = new ActivationIndicator();
+  // Runs for the whole setup below — see ActivationIndicator for why it exists. Held in module
+  // state rather than a local so `disposeSetupState` owns it too: a throw anywhere in setup would
+  // otherwise leave it spinning until the window is reloaded.
+  activationIndicator = new ActivationIndicator();
   activationIndicator.start();
-  context.subscriptions.push({ dispose: () => activationIndicator.dispose() });
 
   let rtkBinPath: string | undefined;
   let rtkFailures: RtkInitFailure[] = [];
@@ -60,7 +120,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (config.rtkIngestEndpoint()) {
         reportingWatcher = new RtkReportingWatcher();
         reportingWatcher.start();
-        context.subscriptions.push({ dispose: () => reportingWatcher?.dispose() });
       }
     }
   } catch (err) {
@@ -97,7 +156,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         } else {
           log(`Headroom ready at ${headroom.binPath}`);
           await ensureHeadroomMcpInstalled(headroom.binPath);
-          await daemon.ensureRunning(headroom.binPath, { forceRestart: headroom.updated });
+          await proxy.ensureRunning(headroom.binPath, { forceRestart: headroom.updated });
 
           // "Start measuring": needs RTK active (it's what feeds the behavioral signals) and the
           // local headroom binary (nothing to run this against in remote mode) — best-effort,
@@ -136,12 +195,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
       tokensaveSyncTimer = new TokensaveSyncTimer(tokensaveBinPath);
       tokensaveSyncTimer.start();
-      context.subscriptions.push({ dispose: () => tokensaveSyncTimer?.dispose() });
 
       if (config.tokensaveIngestEndpoint()) {
         tokensaveReportingWatcher = new TokensaveReportingWatcher();
         tokensaveReportingWatcher.start();
-        context.subscriptions.push({ dispose: () => tokensaveReportingWatcher?.dispose() });
       }
     }
   } catch (err) {
@@ -149,12 +206,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void vscode.window.showErrorMessage(`easy-headroom: TokenSave setup failed — ${formatError(err)}`);
   }
 
-  await daemon.applyEnvironment();
-  daemon.startLifecycleTimers();
+  await proxy.applyEnvironment();
+  if (!lifecycleStarted) {
+    proxy.startLifecycleTimers();
+    lifecycleStarted = true;
+  }
 
   // Hands over to the steady-state item only once the animation has had its minimum run — avoids
   // both a flicker on a fully-cached setup and the two items showing side by side.
   await activationIndicator.finish();
+  activationIndicator = undefined;
 
   statusBar = new HeadroomStatusBar(
     context,
@@ -165,7 +226,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     tokensaveBinPath
   );
   statusBar.start();
-  context.subscriptions.push({ dispose: () => statusBar?.dispose() });
 
   // Fire-and-forget: a staleness hint must never sit in front of a window finishing activation.
   // Only reports on binaries we deferred to rather than installed — see `checkSystemBinaries`.
@@ -173,17 +233,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     .then(() => statusBar?.refresh())
     .catch((err) => log(`System update check failed — ${formatError(err)}`));
 
-  updateCheckTimer = new UpdateCheckTimer(context, daemon, rtkBinPath, () => void statusBar?.refresh());
+  updateCheckTimer = new UpdateCheckTimer(context, proxy, rtkBinPath, () => void statusBar?.refresh());
   updateCheckTimer.start();
-  context.subscriptions.push({ dispose: () => updateCheckTimer?.dispose() });
 
-  context.subscriptions.push(
-    vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('easy-headroom')) {
-        void daemon?.applyEnvironment();
-      }
-    })
-  );
+  if (opts.rerun) {
+    log('Setup re-run finished');
+    // Neither of these can be applied to a session that already exists: an open terminal keeps the
+    // environment it was spawned with, and a running Claude Code session connects its MCP clients
+    // at start. Saying so here is the whole point of the command — otherwise a re-run looks like it
+    // did nothing (see the 0.6.1 report of "j'ai beau reload, le MCP semble mal reconnecté").
+    void vscode.window
+      .showInformationMessage(
+        'easy-headroom: setup re-run. Open a new terminal for the PATH, and start a new Claude Code session for the MCP registrations.',
+        'Show Log'
+      )
+      .then((choice) => {
+        if (choice === 'Show Log') outputChannel.show(true);
+      });
+  }
+}
+
+/** Everything a setup run owns and a re-run replaces. Safe to call when nothing is set up yet. */
+function disposeSetupState(): void {
+  activationIndicator?.dispose();
+  activationIndicator = undefined;
+  statusBar?.dispose();
+  statusBar = undefined;
+  reportingWatcher?.dispose();
+  reportingWatcher = undefined;
+  tokensaveReportingWatcher?.dispose();
+  tokensaveReportingWatcher = undefined;
+  tokensaveSyncTimer?.dispose();
+  tokensaveSyncTimer = undefined;
+  updateCheckTimer?.dispose();
+  updateCheckTimer = undefined;
 }
 
 export async function deactivate(): Promise<void> {

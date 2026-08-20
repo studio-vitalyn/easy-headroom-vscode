@@ -171,6 +171,10 @@
         "title": "easy-headroom: Select TokenSave Version"
       },
       {
+        "command": "easy-headroom.rerunSetup",
+        "title": "easy-headroom: Re-run Setup (Re-wrap)"
+      },
+      {
         "command": "easy-headroom.uninstallCleanup",
         "title": "easy-headroom: Unwrap All (Uninstall / Clean Up)"
       }

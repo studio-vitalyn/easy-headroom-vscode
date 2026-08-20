@@ -2,6 +2,11 @@
 
 All notable changes to the easy-headroom extension are documented here.
 
+## 0.6.2
+
+### Added
+- **"Re-run setup"** — a button in the Settings tab, and `easy-headroom: Re-run Setup (Re-wrap)` in the Command Palette. It replays everything activation does: reinstalls what is missing, re-registers the MCP servers and the TokenSave git hooks, re-indexes the workspace and re-applies the terminal environment. This is how you re-wrap after an "Unwrap all", or retry a setup step that failed, without reloading the window. Terminals that are already open keep the environment they were started with, and Claude Code picks up the MCP registrations when you start a new session — the notification says so, because a re-run otherwise looks like it did nothing.
+
 ## 0.6.1
 
 ### Fixed

@@ -403,7 +403,16 @@ function renderDashboardHtml(opts: {
   .update-notice code { font-family: var(--vscode-editor-font-family, monospace); opacity: 0.9; }
   .update-notice .spacer { flex: 1; }
   .update-notice button { font: inherit; padding: 3px 10px; border-radius: 4px; cursor: pointer; border: 1px solid var(--vscode-button-border, transparent); background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit); }
-  .danger-zone { margin-top: 28px; padding: 14px; border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); border-radius: 6px; }
+  .setup-zone { margin-top: 28px; padding: 14px; border: 1px solid var(--vscode-widget-border); border-radius: 6px; }
+  .setup-zone h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.85; }
+  .setup-zone p { margin: 0 0 10px; font-size: 11px; opacity: 0.8; max-width: 560px; }
+  .setup-btn {
+    font-size: 12px; padding: 4px 12px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--vscode-button-border, transparent);
+    background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground);
+  }
+  .setup-btn:disabled { opacity: 0.6; cursor: default; }
+  .danger-zone { margin-top: 20px; padding: 14px; border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); border-radius: 6px; }
   .danger-zone h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--vscode-errorForeground); }
   .danger-zone p { margin: 0 0 10px; font-size: 11px; opacity: 0.8; max-width: 560px; }
   .danger-btn {
@@ -534,6 +543,18 @@ ${
   <div class="view${showTabs && defaultTab !== 'settings' ? ' hidden' : ''}" id="view-settings">
     <div id="update-notices"></div>
     <div id="settings-content"></div>
+    <div class="setup-zone" id="setup-zone">
+      <h3>Re-run setup</h3>
+      <p>
+        Replays everything activation does: reinstalls whatever is missing, re-registers the MCP
+        servers and the TokenSave git hooks, re-indexes this workspace and re-applies the terminal
+        environment. This is how you re-wrap after an &ldquo;Unwrap all&rdquo;, or retry a setup step
+        that failed, without reloading the window. Terminals that are already open keep the
+        environment they were started with, and Claude Code picks up the MCP registrations when you
+        start a new session.
+      </p>
+      <button type="button" class="setup-btn" id="rerun-setup-btn">Re-run setup</button>
+    </div>
     <div class="danger-zone" id="danger-zone">
       <h3>Unwrap all</h3>
       <p>
@@ -1142,11 +1163,28 @@ ${
     }
   });
 
+  window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'settings:rerunDone' && rerunBtn) {
+      rerunBtn.disabled = false;
+      rerunBtn.textContent = 'Re-run setup';
+    }
+  });
+
   if (document.getElementById('view-rtk')) {
     vscode.postMessage({ type: 'rtk:init' });
   }
   if (document.getElementById('view-tokensave')) {
     vscode.postMessage({ type: 'tokensave:init' });
+  }
+  const rerunBtn = document.getElementById('rerun-setup-btn');
+  if (rerunBtn) {
+    rerunBtn.addEventListener('click', () => {
+      // Setup takes long enough (downloads, indexing) that an unchanged button reads as a dead
+      // click — the host sends settings:rerunDone when it's finished.
+      rerunBtn.disabled = true;
+      rerunBtn.textContent = 'Running…';
+      vscode.postMessage({ type: 'settings:rerunSetup' });
+    });
   }
   const unwrapBtn = document.getElementById('unwrap-all-btn');
   if (unwrapBtn) {
@@ -1324,6 +1362,17 @@ async function openDashboard(context: vscode.ExtensionContext, daemon: ProxyDaem
         }
         return;
       }
+      if (msg?.type === 'settings:rerunSetup') {
+        try {
+          await vscode.commands.executeCommand('easy-headroom.rerunSetup');
+        } finally {
+          // The button stays disabled until this lands, so it has to be sent on failure too.
+          void panel.webview.postMessage({ type: 'settings:rerunDone' });
+        }
+        // Setup rewrites what the snapshot reports — installed versions, wrap state, update notices.
+        postSettingsSnapshot();
+        return;
+      }
       if (msg?.type === 'settings:unwrapAll') {
         const report = await confirmAndRunCleanup(context, daemon);
         // Cleanup rewrites what the settings snapshot reports (installed versions, wrap state), so
@@ -1460,7 +1509,15 @@ async function connectionTestBeforeRemote(): Promise<void> {
   }
 }
 
-export function registerCommands(context: vscode.ExtensionContext, daemon: ProxyDaemonManager): void {
+/**
+ * `runSetup` lives in extension.ts, which imports this module — passed in rather than imported back
+ * to keep that one-way. Used by both the `easy-headroom.rerunSetup` command and the Settings tab.
+ */
+export function registerCommands(
+  context: vscode.ExtensionContext,
+  daemon: ProxyDaemonManager,
+  rerunSetup: () => Promise<void>
+): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('easy-headroom.openDashboard', () => openDashboard(context, daemon)),
     vscode.commands.registerCommand('easy-headroom.openSettings', openSettings),
@@ -1468,7 +1525,8 @@ export function registerCommands(context: vscode.ExtensionContext, daemon: Proxy
     vscode.commands.registerCommand('easy-headroom.selectRtkVersion', selectRtkVersion),
     vscode.commands.registerCommand('easy-headroom.selectHeadroomVersion', selectHeadroomVersion),
     vscode.commands.registerCommand('easy-headroom.selectTokensaveVersion', selectTokensaveVersion),
-    vscode.commands.registerCommand('easy-headroom.uninstallCleanup', () => confirmAndRunCleanup(context, daemon))
+    vscode.commands.registerCommand('easy-headroom.uninstallCleanup', () => confirmAndRunCleanup(context, daemon)),
+    vscode.commands.registerCommand('easy-headroom.rerunSetup', () => rerunSetup())
   );
 
   context.subscriptions.push(

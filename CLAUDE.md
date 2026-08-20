@@ -1261,6 +1261,16 @@ still there for anyone who prefers it). Exists because navigating
 User/Remote/Workspace/Folder scopes for 9 settings via the native UI
 is more friction than this extension's needs warrant.
 
+- **"Re-run setup"**: a bordered block just above the danger zone, same
+  construction — static markup outside `#settings-content`, wired up
+  once at load. It posts `settings:rerunSetup` and the host runs the
+  `easy-headroom.rerunSetup` command (executed by id rather than
+  threaded in as another callback, so the webview handler stays
+  independent of `registerCommands`' wiring). Setup takes long enough —
+  downloads, indexing — that an unchanged button reads as a dead click,
+  so the button disables itself and the host sends `settings:rerunDone`
+  when the run settles, in a `finally` so a failure re-enables it too.
+  See "Re-run setup (re-wrap)".
 - **Danger zone — "unwrap all"**: a bordered block at the bottom of the
   tab, rendered as static markup *outside* `#settings-content` (which
   `renderSettings` overwrites wholesale on every snapshot) and wired up
@@ -1461,6 +1471,49 @@ case — it drives several requirements above:
     choice to the matching `pinnedVersion` setting, then reinstalls.
   - `easy-headroom.uninstallCleanup` (`easy-headroom: Unwrap All
     (Uninstall / Clean Up)`) — see "Uninstall / cleanup" below.
+  - `easy-headroom.rerunSetup` (`easy-headroom: Re-run Setup
+    (Re-wrap)`) — see "Re-run setup (re-wrap)" below.
+
+### Re-run setup ("re-wrap")
+
+The counterpart to "Unwrap all". Cleanup is a *reset*, not an off
+switch — it flips no setting — so the wrap comes back on the next
+activation; before this command the only way to get one was a window
+reload, which is a heavy and non-obvious answer to "how do I re-wrap?".
+
+Everything `activate()` did beyond creating the daemon and registering
+commands lives in `runSetup()` in `extension.ts`, and the command
+replays it in place. Three things make that safe to run at any moment,
+and they are the invariants to preserve when adding a step:
+
+- **Every step is idempotent.** The installers check what is already on
+  disk (see "Init idempotency"), the MCP registrations and git hooks are
+  rewritten rather than appended, and `applyEnvironment` calls
+  `collection.clear()` before rebuilding.
+- **A re-run replaces the things a run owns.** The status bar item, the
+  two reporting watchers, the TokenSave sync timer and the update-check
+  timer are all module state, disposed by `disposeSetupState()` at the
+  top of every run and recreated at the end — otherwise each re-run
+  would leave another copy of every poller running. Anything new that
+  polls, watches or shows UI belongs in that function. The daemon's own
+  lifecycle timers are the exception: they are per-window, started once
+  (`lifecycleStarted`).
+- **Runs are serialized.** Two concurrent runs would race on the same
+  install directories, so a second caller joins the run already in
+  flight (`setupInFlight`) instead of starting its own — this is what a
+  user clicking the button during activation actually does.
+
+Two things a re-run genuinely cannot fix, which is why it ends with a
+notification saying so rather than silently: a terminal keeps the
+environment it was spawned with, and a running Claude Code session
+connects its MCP clients at session start. Without that line a re-run
+looks like it did nothing — exactly the 0.6.1 report of "j'ai beau
+reload, le MCP semble mal reconnecté", where the registration was in
+fact already correct.
+
+`commands.ts` gets `runSetup` passed in as a callback rather than
+importing it: `extension.ts` already imports `commands.ts`, and the
+reverse import would make that circular.
 
 ### Uninstall / cleanup ("unwrap all")
 
