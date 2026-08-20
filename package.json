@@ -2,7 +2,7 @@
   "name": "easy-headroom",
   "displayName": "Easy Headroom",
   "description": "Installs, configures, and manages RTK and Headroom automatically to reduce token consumption for Claude Code, Gemini CLI, and Codex CLI.",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "publisher": "Vitalyn",
   "author": {
     "name": "Vitalyn",
