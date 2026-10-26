@@ -383,12 +383,21 @@ moment it found one on `PATH`.
   `versions.ts`), and records the difference. It skips any path that
   resolves under `globalStorageUri` — our own copy self-updates, so a
   notice there would be noise.
-- **Read-only by construction.** It never upgrades, even behind a click:
-  the binary is the user's, and for TokenSave it is also the live MCP
-  server, so swapping it mid-session is the extension's call to make
-  least of all. `tokensave upgrade` (the tool's own self-updater) is
-  offered as text to copy; RTK has no update subcommand at all, so its
-  notice can only link the releases page.
+- **The check is read-only; the upgrade runs only behind a click.**
+  The notification and the Settings banner offer "Update now"
+  (`runSystemUpgrade`), which runs the upgrade as a VS Code task in a
+  visible terminal, never a hidden spawn: the binary is the user's, so a
+  failure must be theirs to read, and `tokensave upgrade` asks before
+  killing the other running tokensave processes (the live MCP server
+  among them), which only a terminal lets them answer. The command is
+  picked per install by `resolveUpgradeCommand`: `brew upgrade <tool>`
+  when the binary resolves into a Homebrew `Cellar`; `<bin> upgrade` for
+  TokenSave otherwise; for RTK (no update subcommand), its official
+  `install.sh` with `RTK_INSTALL_DIR` set to the binary's own directory
+  (it checksums the archive and never prompts). No button, only the
+  releases link, when RTK is cargo-built, on Windows (the script is
+  sh-only), or in a directory we can't write. When the task ends the
+  version is re-checked, so every notice clears by itself once it worked.
 - Cached in `globalState` under `systemUpdate.latest.<tool>` on the same
   24h cadence as the marker files, so the periodic re-check
   (`updateCheck.ts`) costs one unauthenticated request per tool per day.

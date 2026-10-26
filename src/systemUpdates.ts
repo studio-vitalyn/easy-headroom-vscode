@@ -1,3 +1,5 @@
+import * as fs from 'fs/promises';
+import { constants as fsConstants } from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
@@ -8,18 +10,46 @@ import { log } from './log';
 
 export type ToolId = 'rtk' | 'tokensave';
 
-interface ToolSpec {
-  repo: string;
-  /** The tool's own self-updater, when it has one. */
-  upgradeCommand?: string;
+const TOOLS: Record<ToolId, { repo: string }> = {
+  rtk: { repo: RTK_REPO },
+  tokensave: { repo: TOKENSAVE_REPO },
+};
+
+// RTK's own installer: verifies the archive against the release's checksums.txt, never prompts,
+// and takes its target directory from RTK_INSTALL_DIR — so it can overwrite the copy in use in place.
+const RTK_INSTALL_SCRIPT = 'https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh';
+
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-const TOOLS: Record<ToolId, ToolSpec> = {
-  // RTK has no update/upgrade subcommand (checked against `rtk --help`), so its notice can only
-  // point at the releases page — there is nothing to copy that would do the job.
-  rtk: { repo: RTK_REPO },
-  tokensave: { repo: TOKENSAVE_REPO, upgradeCommand: 'tokensave upgrade' },
-};
+/**
+ * How to upgrade the copy at `binPath`, as a POSIX shell line — or undefined when there's no way we
+ * can be confident of. Homebrew is asked to do it when it owns the binary (overwriting a file in its
+ * Cellar would leave brew believing in a version that's no longer there). Otherwise TokenSave has
+ * its own self-updater, and RTK — which has none (checked against `rtk --help`) — gets its install
+ * script pointed at the binary's own directory, provided we can write there.
+ */
+async function resolveUpgradeCommand(tool: ToolId, binPath: string): Promise<string | undefined> {
+  const real = await fs.realpath(binPath).catch(() => binPath);
+  if (/[\\/]Cellar[\\/]/.test(real)) return `brew upgrade ${tool}`;
+  if (tool === 'tokensave') return `${shQuote(binPath)} upgrade`;
+  // The install script is sh-only, and a cargo-built rtk would be replaced by a release build.
+  if (process.platform === 'win32' || /[\\/]\.cargo[\\/]bin[\\/]/.test(real)) return undefined;
+  const dir = path.dirname(real);
+  try {
+    await fs.access(dir, fsConstants.W_OK);
+  } catch {
+    return undefined;
+  }
+  return `curl -fsSL ${RTK_INSTALL_SCRIPT} | RTK_INSTALL_DIR=${shQuote(dir)} sh`;
+}
+
+const changeEmitter = new vscode.EventEmitter<void>();
+/** Fires when a notice appears or goes away outside a caller's own await — i.e. after an upgrade. */
+export const onDidChangeUpdates = changeEmitter.event;
+
+const upgrading = new Set<ToolId>();
 
 // Same cadence as the marker-file gates in tokensave.ts/headroom.ts, for the same reason: one
 // unauthenticated GitHub request per tool per day, whatever a window's reload pattern looks like.
@@ -99,26 +129,88 @@ async function resolveLatest(context: vscode.ExtensionContext, tool: ToolId): Pr
 }
 
 /**
+ * Runs the upgrade only on an explicit click, and in a visible terminal rather than a hidden spawn:
+ * the binary is the user's, not ours (see "Prefer an existing system install" in CLAUDE.md), so a
+ * failure must be theirs to read, and `tokensave upgrade` asks before killing the other running
+ * tokensave processes — the live MCP server among them — which only a terminal lets them answer.
+ * Re-checks the version afterwards, so the notice, the tooltip and the Settings banner clear on
+ * their own once it worked.
+ */
+export async function runSystemUpgrade(context: vscode.ExtensionContext, tool: ToolId): Promise<void> {
+  const notice = notices.get(tool);
+  if (!notice?.upgradeCommand || upgrading.has(tool)) return;
+  upgrading.add(tool);
+  try {
+    // Pinned to /bin/sh so the quoting in `upgradeCommand` holds whatever the user's own shell is.
+    // On Windows (TokenSave only — see resolveUpgradeCommand) the binary is run directly instead.
+    const execution =
+      process.platform === 'win32'
+        ? new vscode.ShellExecution({ value: notice.binPath, quoting: vscode.ShellQuoting.Strong }, ['upgrade'])
+        : new vscode.ShellExecution(notice.upgradeCommand, { executable: '/bin/sh', shellArgs: ['-c'] });
+    const task = new vscode.Task(
+      { type: 'shell', id: `easy-headroom-upgrade-${tool}` },
+      vscode.TaskScope.Global,
+      `Upgrade ${tool}`,
+      'easy-headroom',
+      execution
+    );
+    task.presentationOptions = { reveal: vscode.TaskRevealKind.Always, focus: true, panel: vscode.TaskPanelKind.Dedicated };
+
+    const exitCode = await new Promise<number | undefined>((resolve, reject) => {
+      let started: vscode.TaskExecution | undefined;
+      const sub = vscode.tasks.onDidEndTaskProcess((e) => {
+        if (e.execution === started || e.execution.task.definition.id === task.definition.id) {
+          sub.dispose();
+          resolve(e.exitCode);
+        }
+      });
+      vscode.tasks.executeTask(task).then(
+        (execution) => (started = execution),
+        (err) => {
+          sub.dispose();
+          reject(err);
+        }
+      );
+    });
+
+    await checkSystemBinaries(context, { [tool]: notice.binPath }, { notify: false });
+    changeEmitter.fire();
+    const after = notices.get(tool);
+    if (exitCode === 0 && !after) {
+      void vscode.window.showInformationMessage(
+        `easy-headroom: ${tool} upgraded to ${notice.latest}.` +
+          (tool === 'tokensave' ? ' Start a new Claude Code session to use it as the MCP server.' : '')
+      );
+    } else {
+      void vscode.window.showWarningMessage(
+        `easy-headroom: the ${tool} upgrade didn't complete${exitCode ? ` (exit code ${exitCode})` : ''} — see the "Upgrade ${tool}" terminal.`
+      );
+    }
+  } catch (err) {
+    log(`Upgrade of ${tool} failed — ${formatError(err)}`);
+    void vscode.window.showErrorMessage(`easy-headroom: could not start the ${tool} upgrade — ${formatError(err)}`);
+  } finally {
+    upgrading.delete(tool);
+  }
+}
+
+/**
  * Once per (tool, version) for the lifetime of the install — a nag that reappears on every window
- * reload is one people learn to dismiss without reading. Deliberately does *not* run the upgrade
- * itself, even behind a click: this binary is the user's, not ours (see "Prefer an existing system
- * install" in CLAUDE.md), and for TokenSave it is also the live MCP server, so swapping it out from
- * under a running session is the extension's call to make least of all. The command goes to the
- * clipboard instead, to be run where the user can see it fail.
+ * reload is one people learn to dismiss without reading. The upgrade itself only ever runs behind
+ * the click — see `runSystemUpgrade`.
  */
 async function notifyOnce(context: vscode.ExtensionContext, notice: UpdateNotice): Promise<void> {
   if (context.globalState.get<string>(NOTIFIED_KEY(notice.tool)) === notice.latest) return;
   await context.globalState.update(NOTIFIED_KEY(notice.tool), notice.latest);
 
-  const actions = notice.upgradeCommand ? ['Copy upgrade command', 'Release notes'] : ['Release notes'];
+  const actions = notice.upgradeCommand ? ['Update now', 'Release notes'] : ['Release notes'];
   const choice = await vscode.window.showInformationMessage(
-    `easy-headroom: ${notice.tool} ${notice.current} is installed on this machine — ${notice.latest} is available. ` +
-      `The extension uses your own install and never upgrades it for you.`,
+    `easy-headroom: ${notice.tool} ${notice.current} is installed on this machine — ${notice.latest} is available.` +
+      (notice.upgradeCommand ? '' : ' This install has to be upgraded by hand.'),
     ...actions
   );
-  if (choice === 'Copy upgrade command' && notice.upgradeCommand) {
-    await vscode.env.clipboard.writeText(notice.upgradeCommand);
-    void vscode.window.showInformationMessage(`Copied: ${notice.upgradeCommand}`);
+  if (choice === 'Update now') {
+    await runSystemUpgrade(context, notice.tool);
   } else if (choice === 'Release notes') {
     void vscode.env.openExternal(vscode.Uri.parse(notice.releasesUrl));
   }
@@ -133,7 +225,8 @@ async function notifyOnce(context: vscode.ExtensionContext, notice: UpdateNotice
  */
 export async function checkSystemBinaries(
   context: vscode.ExtensionContext,
-  bins: Partial<Record<ToolId, string | undefined>>
+  bins: Partial<Record<ToolId, string | undefined>>,
+  opts: { notify?: boolean } = {}
 ): Promise<void> {
   const paths = storagePaths(context);
   const ownCopy: Record<ToolId, string> = { rtk: paths.rtkBinPath, tokensave: paths.tokensaveBinPath };
@@ -163,12 +256,14 @@ export async function checkSystemBinaries(
         current,
         latest: latest.replace(/^v/i, ''),
         binPath,
-        upgradeCommand: TOOLS[tool].upgradeCommand,
+        upgradeCommand: await resolveUpgradeCommand(tool, binPath),
         releasesUrl: `https://github.com/${TOOLS[tool].repo}/releases`,
       };
       notices.set(tool, notice);
       log(`System ${tool} at ${binPath} is ${current}; ${notice.latest} is available`);
-      await notifyOnce(context, notice);
+      // Not awaited: the toast stays up until dismissed, and an upgrade behind it takes a while —
+      // neither should hold up activation or the update timer's tick.
+      if (opts.notify !== false) void notifyOnce(context, notice);
     } catch (err) {
       log(`Update check failed for ${tool} — ${formatError(err)}`);
     }

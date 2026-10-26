@@ -19,7 +19,7 @@ import { UpdateCheckTimer } from './updateCheck';
 import { EXTENSION_VERSION } from './buildInfo';
 import { registerCommands } from './commands';
 import { recordTouchedProject } from './projects';
-import { checkSystemBinaries } from './systemUpdates';
+import { checkSystemBinaries, onDidChangeUpdates } from './systemUpdates';
 import { formatError } from './errors';
 import { outputChannel, log } from './log';
 
@@ -43,6 +43,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const proxy = new ProxyDaemonManager(context);
   daemon = proxy;
   registerCommands(context, proxy, () => runSetup(context, proxy, { rerun: true }));
+  // An upgrade run from a notification finishes long after the check that offered it.
+  context.subscriptions.push(onDidChangeUpdates(() => void statusBar?.refresh()));
 
   await runSetup(context, proxy);
 

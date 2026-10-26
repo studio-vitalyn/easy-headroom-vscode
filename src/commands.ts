@@ -7,7 +7,7 @@ import { config } from './config';
 import { storagePaths } from './paths';
 import { ProxyDaemonManager, checkHealth } from './daemon';
 import { runFullCleanup, formatCleanupReport, type CleanupReport } from './cleanup';
-import { knownUpdates, type ToolId } from './systemUpdates';
+import { knownUpdates, runSystemUpgrade, type ToolId } from './systemUpdates';
 import { log, outputChannel } from './log';
 import { listRtkReleases, listHeadroomReleases, listTokensaveReleases } from './versions';
 import { getRtkStats, getRtkProjects } from './rtkStats';
@@ -895,8 +895,8 @@ ${
   // Group/label/type/description/scope all come from package.json's contributes.configuration
   // (see settingsMeta.ts) — this only builds the DOM and wires up writes, it doesn't hardcode
   // any of that metadata itself.
-  // Binaries the extension deferred to instead of installing: it never upgrades those, so the only
-  // thing it can usefully do is say so where the versions are already on screen.
+  // Binaries the extension deferred to instead of installing: it only upgrades those on an explicit
+  // click (see runSystemUpgrade), so the notice stays where the versions are already on screen.
   function renderUpdateNotices(updates) {
     const host = document.getElementById('update-notices');
     if (!host) return;
@@ -916,6 +916,14 @@ ${
       spacer.className = 'spacer';
       row.appendChild(spacer);
       if (u.upgradeCommand) {
+        const upgrade = document.createElement('button');
+        upgrade.type = 'button';
+        upgrade.textContent = 'Update now';
+        upgrade.addEventListener('click', () => {
+          upgrade.disabled = true;
+          vscode.postMessage({ type: 'settings:upgrade', tool: u.tool });
+        });
+        row.appendChild(upgrade);
         const copy = document.createElement('button');
         copy.type = 'button';
         copy.textContent = 'Copy command';
@@ -1348,6 +1356,11 @@ async function openDashboard(context: vscode.ExtensionContext, daemon: ProxyDaem
         // The onDidChangeConfiguration listener above also resends a fresh snapshot, but that
         // fires async on VS Code's own timing — resend here too so the scope select and any
         // dependent value the user just touched update without a visible delay.
+        postSettingsSnapshot();
+        return;
+      }
+      if (msg?.type === 'settings:upgrade') {
+        if (msg.tool === 'rtk' || msg.tool === 'tokensave') await runSystemUpgrade(context, msg.tool);
         postSettingsSnapshot();
         return;
       }

@@ -6,6 +6,7 @@ All notable changes to the easy-headroom extension are documented here.
 
 ### Added
 - **Dollars saved in the status bar**, next to the shield: the total for Headroom, RTK and TokenSave together, with the per-tool breakdown in the tooltip. RTK records tokens but no cost, so its share is priced at TokenSave's own rate ($3 per million input tokens) and marked as an estimate.
+- **"Update now" for an outdated `rtk` or `tokensave` you installed yourself**, in the notification and in the Settings tab, instead of only telling you about it. The upgrade runs in a visible terminal (`brew upgrade` for a Homebrew install, `tokensave upgrade`, or RTK's official install script into the same directory), and the notice clears once the new version is in place.
 
 ## 0.6.2
 
