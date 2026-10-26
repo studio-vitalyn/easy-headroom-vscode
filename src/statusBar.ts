@@ -3,13 +3,22 @@ import * as vscode from 'vscode';
 import { config } from './config';
 import { checkHealth, fetchRemoteHeadroomVersion } from './daemon';
 import { RtkInitFailure } from './rtk';
-import { TokensaveIndexFailure, getInstalledTokensaveVersion } from './tokensave';
+import { TokensaveIndexFailure, getInstalledTokensaveVersion, runCapture } from './tokensave';
 import { getInstalledHeadroomVersion } from './headroom';
 import { knownUpdate } from './systemUpdates';
 import { log } from './log';
 
-const SPARKLINE_CHARS = '▁▂▃▄▅▆▇█';
 const POLL_INTERVAL_MS = 30_000;
+const STATS_TIMEOUT_MS = 2_000;
+// The dollar total moves slowly and costs two spawns plus a request to read, so it's re-read on its
+// own, slower cadence; health and versions keep the 30s poll.
+const USD_REFRESH_MS = 5 * 60_000;
+
+// RTK records saved tokens but no dollar figure. Priced at the same rate TokenSave's own `usd`
+// uses ("USD saved (Sonnet input)" in `tokensave gain`, i.e. $3/MTok — checked: 798,016 tokens →
+// $2.39): what RTK trims is shell output the model would otherwise have read as input, so it's the
+// same kind of token, and one convention across both keeps the two figures comparable.
+const RTK_USD_PER_TOKEN = 3 / 1_000_000;
 
 const ACTIVATION_LABEL = 'easy-headroom';
 const ACTIVATION_FRAME_MS = 120;
@@ -70,12 +79,18 @@ export class ActivationIndicator {
 type DaemonState = 'ok' | 'not-initialized' | 'error';
 
 /**
- * Schema of `rtk gain --format json` isn't pinned down yet (see CLAUDE.md open questions) — this
- * reads defensively and degrades to a state-only status bar if the fields it expects aren't there.
+ * `rtk gain --format json` prints `{ summary: { total_saved, ... } }` (confirmed against rtk
+ * 0.45.0) — read defensively, a missing field just drops RTK out of the dollar total.
  */
 interface RtkGainSummary {
-  totalSaved?: number;
-  history?: number[];
+  summary?: { total_saved?: number };
+}
+
+/** Per-source dollar savings; a source is undefined when it's disabled or couldn't be read. */
+interface UsdSaved {
+  headroom?: number;
+  rtk?: number;
+  tokensave?: number;
 }
 
 // Marker/tag-sourced versions (TokenSave's GitHub release tag, e.g. "v7.8.1") may already carry a
@@ -84,12 +99,48 @@ function stripV(version: string | undefined): string | undefined {
   return version?.replace(/^v/i, '');
 }
 
-function sparkline(values: number[]): string {
-  if (values.length === 0) return '';
-  const max = Math.max(...values, 1);
-  return values
-    .map((v) => SPARKLINE_CHARS[Math.min(SPARKLINE_CHARS.length - 1, Math.floor((v / max) * (SPARKLINE_CHARS.length - 1)))])
-    .join('');
+function fmtUsd(n: number): string {
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: n >= 100 ? 0 : 2 });
+}
+
+function totalUsd(usd: UsdSaved): number | undefined {
+  const values = [usd.headroom, usd.rtk, usd.tokensave].filter((v): v is number => v !== undefined);
+  return values.length ? values.reduce((a, b) => a + b, 0) : undefined;
+}
+
+/**
+ * Headroom's lifetime `summary.cost.total_saved_usd` off `/stats` — the same field the dashboard's
+ * Headroom tab shows. In remote mode that's the shared instance's total, across every machine
+ * reporting to it, since that's the only figure the proxy keeps.
+ */
+async function readHeadroomUsd(): Promise<number | undefined> {
+  if (!config.headroomEnabled()) return undefined;
+  const base = config.mode() === 'local' ? `http://127.0.0.1:${config.headroomLocalPort()}` : config.remoteUrl();
+  if (!base) return undefined;
+  const headers: Record<string, string> = {};
+  const proxyToken = config.proxyToken();
+  if (config.mode() === 'remote' && proxyToken) headers['X-Headroom-Proxy-Token'] = proxyToken;
+  try {
+    const res = await fetch(`${base.replace(/\/$/, '')}/stats`, { headers, signal: AbortSignal.timeout(STATS_TIMEOUT_MS) });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { summary?: { cost?: { total_saved_usd?: unknown } } };
+    const usd = body.summary?.cost?.total_saved_usd;
+    return typeof usd === 'number' ? usd : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** All projects, all time — the machine-wide ledger, matching RTK's own machine-wide history.db. */
+async function readTokensaveUsd(tokensaveBinPath: string | undefined): Promise<number | undefined> {
+  if (!tokensaveBinPath || !config.tokensaveEnabled()) return undefined;
+  try {
+    const { stdout } = await runCapture(tokensaveBinPath, ['gain', '--json', '--all', '--range', 'all']);
+    const usd = (JSON.parse(stdout) as { usd?: unknown }).usd;
+    return typeof usd === 'number' ? usd : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function readRtkGain(rtkBinPath: string | undefined): Promise<RtkGainSummary | undefined> {
@@ -167,6 +218,22 @@ export class HeadroomStatusBar {
     this.item = vscode.window.createStatusBarItem('easy-headroom.status', vscode.StatusBarAlignment.Right, 100);
   }
 
+  private usd: UsdSaved = {};
+  private usdReadAt = 0;
+
+  private async readUsd(): Promise<UsdSaved> {
+    if (Date.now() - this.usdReadAt < USD_REFRESH_MS) return this.usd;
+    const [gain, headroom, tokensave] = await Promise.all([
+      readRtkGain(this.rtkBinPath),
+      readHeadroomUsd(),
+      readTokensaveUsd(this.tokensaveBinPath),
+    ]);
+    const rtkSaved = gain?.summary?.total_saved;
+    this.usd = { headroom, rtk: typeof rtkSaved === 'number' ? rtkSaved * RTK_USD_PER_TOKEN : undefined, tokensave };
+    this.usdReadAt = Date.now();
+    return this.usd;
+  }
+
   /** True when the extension can't function as configured and needs user action, not just a transient blip. */
   private isBroken(state: DaemonState): boolean {
     return (
@@ -179,9 +246,9 @@ export class HeadroomStatusBar {
 
   async refresh(): Promise<void> {
     const state = await this.computeState();
-    const gain = await readRtkGain(this.rtkBinPath);
     const remoteUrl = config.remoteUrl();
-    const [rtkVersion, headroomVersion, tokensaveVersion, headroomRemoteVersion] = await Promise.all([
+    const [usd, rtkVersion, headroomVersion, tokensaveVersion, headroomRemoteVersion] = await Promise.all([
+      this.readUsd(),
       readRtkVersion(this.rtkBinPath),
       getInstalledHeadroomVersion(this.context),
       this.tokensaveBinPath ? getInstalledTokensaveVersion(this.context, this.tokensaveBinPath) : Promise.resolve(undefined),
@@ -190,9 +257,8 @@ export class HeadroomStatusBar {
         : Promise.resolve(undefined),
     ]);
     const broken = this.isBroken(state);
-
-    this.item.text = this.renderText(gain);
-    this.item.tooltip = this.renderTooltip(state, gain, {
+    this.item.text = this.renderText(usd);
+    this.item.tooltip = this.renderTooltip(state, usd, {
       rtkVersion,
       headroomVersion,
       tokensaveVersion,
@@ -213,23 +279,17 @@ export class HeadroomStatusBar {
     this.item.show();
   }
 
-  private renderText(gain?: RtkGainSummary): string {
+  private renderText(usd: UsdSaved): string {
     // $(shield) stands in for assets/easy-headroom-ico.svg — VS Code status bar items only
     // render Codicons/contributed icon-fonts in `text`, not arbitrary SVGs, and no icon-font
     // build pipeline exists for this extension yet.
-    const parts = ['$(shield)'];
-    if (gain?.totalSaved !== undefined) {
-      parts.push(`${gain.totalSaved.toLocaleString()} saved`);
-    }
-    if (gain?.history?.length) {
-      parts.push(sparkline(gain.history));
-    }
-    return parts.join(' ');
+    const total = totalUsd(usd);
+    return total === undefined ? '$(shield)' : `$(shield) ${fmtUsd(total)}`;
   }
 
   private renderTooltip(
     state: DaemonState,
-    gain?: RtkGainSummary,
+    usd: UsdSaved,
     versions?: {
       rtkVersion?: string;
       headroomVersion?: string;
@@ -295,8 +355,17 @@ export class HeadroomStatusBar {
     }
     md.appendMarkdown(`\n\n`);
 
-    if (gain?.totalSaved !== undefined) {
-      md.appendMarkdown(`Total saved: ${gain.totalSaved.toLocaleString()}\n\n`);
+    const total = totalUsd(usd);
+    if (total !== undefined) {
+      const breakdown = [
+        usd.headroom !== undefined ? `Headroom ${fmtUsd(usd.headroom)}` : undefined,
+        usd.rtk !== undefined ? `RTK ~${fmtUsd(usd.rtk)}` : undefined,
+        usd.tokensave !== undefined ? `TokenSave ${fmtUsd(usd.tokensave)}` : undefined,
+      ].filter(Boolean);
+      md.appendMarkdown(`Total saved: **${fmtUsd(total)}** (${breakdown.join(' · ')})\n\n`);
+      if (usd.rtk !== undefined) {
+        md.appendMarkdown(`_RTK keeps no dollar figure — its tokens are priced at TokenSave's rate ($3 per million input tokens)._\n\n`);
+      }
     }
     md.appendMarkdown(`Click to open the dashboard.`);
     return md;

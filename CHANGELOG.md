@@ -2,6 +2,11 @@
 
 All notable changes to the easy-headroom extension are documented here.
 
+## 0.6.3
+
+### Added
+- **Dollars saved in the status bar**, next to the shield: the total for Headroom, RTK and TokenSave together, with the per-tool breakdown in the tooltip. RTK records tokens but no cost, so its share is priced at TokenSave's own rate ($3 per million input tokens) and marked as an estimate.
+
 ## 0.6.2
 
 ### Added

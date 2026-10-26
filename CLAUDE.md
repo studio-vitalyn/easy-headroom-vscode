@@ -926,9 +926,20 @@ would both try to bind the same port and collide.
     switch the command based on state.
 - **Content** (VS Code status bar items can't render real
   charts/canvas — text + Codicons only):
-  - Bar text: compact numeric summary (e.g. tokens/€ saved), optionally
-    followed by a Unicode block sparkline (▁▂▃▄▅▆▇█) built from recent
-    savings data points — cheap inline "mini graph", no dependencies.
+  - Bar text: `$(shield) $<total>`, the dollars saved by all three
+    layers together, machine-wide and all-time. Headroom's comes from
+    `/stats`' `summary.cost.total_saved_usd` (in remote mode, the shared
+    instance's total); TokenSave's from `tokensave gain --json --all
+    --range all`'s `usd`; RTK keeps no dollar figure, so its
+    `summary.total_saved` tokens are priced at TokenSave's own rate
+    ($3/MTok, "Sonnet input") — flagged as such in the tooltip, which
+    also shows the per-layer breakdown. A layer that's disabled or
+    unreadable drops out of the sum; with none left, the bar is the bare
+    shield. Re-read every 5 minutes (`USD_REFRESH_MS`, cached on the
+    status bar instance), not on the 30s health poll: it moves slowly and
+    costs two spawns plus a request. (An earlier version read `totalSaved`/`history` fields that
+    `rtk gain --format json` never had, so its token count and sparkline
+    never actually rendered.)
   - Tooltip (`MarkdownString`): richer breakdown on hover — RTK,
     Headroom, and TokenSave each get their own enabled/disabled line
     (plus a failure summary when broken) — still no real chart, just
